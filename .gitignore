@@ -1,0 +1,15 @@
+bin/
+obj/
+publish/
+.agents/
+.codex/
+
+*.user
+*.suo
+*.log
+*.tmp
+*.download
+
+runtime/
+downloads/
+logs/

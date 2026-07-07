@@ -1,0 +1,124 @@
+{
+  "version": "tools-v1",
+  "repository": "yancy520666/system-toolkit-tools",
+  "note": "Remote toolbox assets from GitHub Release. The app downloads on demand and verifies SHA256.",
+  "tools": {
+    "dxRepair": {
+      "version": "local",
+      "description": "修复 DirectX 运行环境缺失或损坏问题，解决部分游戏、图形软件因 DirectX 组件异常导致的无法启动、黑屏、闪退或 DLL 缺失报错。",
+      "size": 1072128,
+      "sha256": "5F098ECAB031F31BBD6BBC2323F0F8DB4850B5DBDB51A7E14EC07E81374CA7DD",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/dx-repair.exe",
+      "assetName": "dx-repair.exe",
+      "aliases": ["1：DX修复.exe"]
+    },
+    "runtime": {
+      "version": "local",
+      "description": "安装常用微软运行库组件，适合重装系统后先补齐软件和游戏所需环境。",
+      "size": 80665078,
+      "sha256": "3468E045A2244F6DFB37DF7F022A61CC79E1ABF1216ABEE2BD2CA095AAEF9E24",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/runtime-libraries.exe",
+      "assetName": "runtime-libraries.exe",
+      "aliases": ["2：运行库.exe"]
+    },
+    "activation": {
+      "version": "local",
+      "description": "打开 Windows 激活辅助工具，用于处理系统未激活或激活状态异常的场景。如激活失败请尝试使用命令行激活工具",
+      "size": 968704,
+      "sha256": "7DAFAE28CDFB72F1BA7B6963F18C58CD74BE79B365DBAC7CF492D949691FE425",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/windows-activation.exe",
+      "assetName": "windows-activation.exe",
+      "aliases": ["3：win系统激活.exe"]
+    },
+    "disableUac": {
+      "version": "local",
+      "description": "关闭 UAC 用户账户控制提示，适合需要减少管理员确认弹窗的维护环境。",
+      "size": 189732,
+      "sha256": "00A3E8C04C62965BAA01494F15FE36D1D9EE6CC6626E4E5FFB804DB775ACB0F8",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/disable-uac.exe",
+      "assetName": "disable-uac.exe",
+      "aliases": ["4：关闭uac.exe"]
+    },
+    "disableSecurityUpdate": {
+      "version": "local",
+      "description": "关闭 Defender 安全中心和 Windows 自动更新，请注意终结 Windows Update 组件会导致微软商店等功能异常，建议选择禁用选项！",
+      "size": 522552,
+      "sha256": "89835ACC8E83DC7EFAB5B4DF6066E3B4258D37720B02262A95C02DE256A5BD7A",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/disable-security-update.exe",
+      "assetName": "disable-security-update.exe",
+      "aliases": ["5：关杀毒更新.exe"]
+    },
+    "driverToolVip": {
+      "version": "local",
+      "description": "启动驱动安装辅助工具，用于补齐常见硬件驱动和装机后的基础驱动环境。",
+      "size": 26195121,
+      "sha256": "17768719B4FECFF3DB3D3782645D54E8B12B30F815E349A4A67E4D628102D680",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/driver-tool-vip.exe",
+      "assetName": "driver-tool-vip.exe",
+      "aliases": ["6：驱动总裁VIP版本.exe"]
+    },
+    "disableCoreIsolation": {
+      "version": "local",
+      "description": "关闭内核隔离相关设置，可改善部分兼容性问题。",
+      "size": 91136,
+      "sha256": "CD8133446CA7479C8641A6CA7564E6CD780AA1F36997ADCE71EFF4952D63A67A",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/disable-core-isolation.exe",
+      "assetName": "disable-core-isolation.exe",
+      "aliases": ["7：一键关闭Windows内核隔离.exe"]
+    },
+    "sevenZip": {
+      "version": "26.02",
+      "description": "安装 7-Zip 压缩工具，用于处理 7z、zip、rar 等常见压缩包。",
+      "size": 1657896,
+      "sha256": "6745FA76DC2EA031596D8678F6F6B99C3C1B435B4164A63485ADBBC7B8D82EF0",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/7z2602-x64.exe",
+      "assetName": "7z2602-x64.exe",
+      "aliases": ["7z2602-x64.exe"]
+    },
+    "geekUninstaller": {
+      "version": "local",
+      "description": "启动 Geek 卸载工具，用于卸载软件并清理常见残留项。",
+      "size": 7534984,
+      "sha256": "1CDE4D0AA4141500CA8603E0FF61164BCC92641FB41BF62BE044F561082D0405",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/geek-uninstaller.exe",
+      "assetName": "geek-uninstaller.exe",
+      "aliases": ["geek.exe"]
+    },
+    "browserHijackClean": {
+      "version": "local",
+      "description": "清理浏览器主页、搜索和快捷方式劫持项，适合重装系统后浏览器被篡改时使用。",
+      "size": 11306,
+      "sha256": "05F2B3BDD9C762E967FA71A1581B2806D77548762789C493CCF6205B35A1D672",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/browser-hijack-clean.bat",
+      "assetName": "browser-hijack-clean.bat",
+      "aliases": ["一键清理重装后的浏览器劫持.bat"]
+    },
+    "oneKeyActivate": {
+      "version": "local",
+      "description": "使用开源命令行工具激活 Windows 和 Office 服务",
+      "size": 1542,
+      "sha256": "4E13B906F0D87310C4BD0EF478E0A100CEDE5EFB6D404F49E2BD0D9B82F48DD0",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/one-key-activate-windows.bat",
+      "assetName": "one-key-activate-windows.bat",
+      "aliases": ["一键激活Windows.bat"]
+    },
+    "archiveTool": {
+      "version": "local",
+      "description": "启动备用rar解压工具，用于处理常见压缩包和装机包解压场景。",
+      "size": 2337547,
+      "sha256": "6A7CCC42EB60402A5220B3769AF4832EF392B3E743E0B093F9494E40227060C9",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/archive-tool.exe",
+      "assetName": "archive-tool.exe",
+      "aliases": ["解压软件.exe"]
+    },
+    "visualFix": {
+      "version": "local",
+      "description": "修复 Windows 11 右键菜单、任务栏或视觉体验相关异常。",
+      "size": 9237,
+      "sha256": "2D397083F7473BEB5DE0BFE21BCD8423832CA359D932CFC6A49800C8C0DB6F65",
+      "downloadUrl": "https://raw.githubusercontent.com/yancy520666/system-toolkit-tools/41f0a5dd0dde9f34b810d5459cb4ca7cca1a3e75/tools-v1/win11-visual-fix.bat",
+      "assetName": "win11-visual-fix.bat",
+      "aliases": ["win11-visual-fix.bat", "一键修复Win11视觉体验.bat"]
+    }
+  }
+}

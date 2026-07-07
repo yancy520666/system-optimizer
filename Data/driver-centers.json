@@ -1,0 +1,589 @@
+{
+  "mechrevo": {
+    "brandName": "机械革命 MECHREVO",
+    "aliases": [
+      "MECHREVO",
+      "机械革命",
+      "MACHENIKE",
+      "TONGFANG",
+      "Tongfang"
+    ],
+    "officialDomains": [
+      "mechrevo.com",
+      "www.mechrevo.com",
+      "driver.mechrevo.com"
+    ],
+    "supportPage": "https://www.mechrevo.com/cn/downloads",
+    "models": [
+      {
+        "series": "耀世系列",
+        "officialModel": "耀世18 Ultra",
+        "driverCenterName": "耀世18 Ultra 驱动合集",
+        "version": "官网最新版",
+        "os": [
+          "Windows 11 64-bit"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "downloadUrl": "https://driver.mechrevo.com/d.mechrevo.com/driver/MECHREVO2026/Gaming/YS18Pro/YS18Pro_X8AR_260522.zip",
+        "fileName": "yaoshi-18-ultra-driver.zip",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "耀世18 Ultra",
+          "耀世18Ultra",
+          "耀世 18 Ultra",
+          "18 Ultra",
+          "YS18"
+        ]
+      },
+      {
+        "series": "耀世系列",
+        "officialModel": "耀世16 Ultra",
+        "driverCenterName": "耀世16 Ultra 驱动合集",
+        "version": "官网最新版",
+        "os": [
+          "Windows 11 64-bit"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "downloadUrl": "https://driver.mechrevo.com/d.mechrevo.com/driver/MECHREVO2026/Gaming/YS16Ultra/YS16Ultra_X6AF_BZ_260529.zip",
+        "fileName": "yaoshi-16-ultra-driver.zip",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "耀世16 Ultra",
+          "耀世16Ultra",
+          "耀世 16 Ultra",
+          "16 Ultra",
+          "YS16"
+        ]
+      },
+      {
+        "series": "耀世系列",
+        "officialModel": "耀世18 PRO",
+        "driverCenterName": "耀世18 PRO 驱动合集",
+        "os": [
+          "Windows 11 64-bit"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "耀世18 PRO",
+          "耀世18 Pro",
+          "18 PRO",
+          "18Pro"
+        ]
+      },
+      {
+        "series": "耀世系列",
+        "officialModel": "耀世16 PRO",
+        "driverCenterName": "耀世16 PRO 驱动合集",
+        "os": [
+          "Windows 11 64-bit"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "耀世16 PRO",
+          "耀世16 Pro",
+          "16 PRO",
+          "16Pro"
+        ]
+      },
+      {
+        "series": "苍龙系列",
+        "officialModel": "苍龙系列",
+        "driverCenterName": "苍龙系列 驱动合集",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "苍龙",
+          "苍龙系列"
+        ]
+      },
+      {
+        "series": "翼龙系列",
+        "officialModel": "翼龙系列",
+        "driverCenterName": "翼龙系列 驱动合集",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "翼龙",
+          "翼龙系列"
+        ]
+      },
+      {
+        "series": "极光系列",
+        "officialModel": "极光系列",
+        "driverCenterName": "极光系列 驱动合集",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "极光",
+          "极光系列"
+        ]
+      },
+      {
+        "series": "蛟龙系列",
+        "officialModel": "蛟龙系列",
+        "driverCenterName": "蛟龙系列 驱动合集",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "蛟龙",
+          "蛟龙系列"
+        ]
+      },
+      {
+        "series": "旷世系列",
+        "officialModel": "旷世系列",
+        "driverCenterName": "旷世系列 驱动合集",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "旷世",
+          "旷世系列"
+        ]
+      },
+      {
+        "series": "无界系列",
+        "officialModel": "无界系列",
+        "driverCenterName": "无界系列 驱动合集",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "无界",
+          "无界系列"
+        ]
+      },
+      {
+        "series": "星耀系列",
+        "officialModel": "星耀系列",
+        "driverCenterName": "星耀系列 驱动合集",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "星耀",
+          "星耀系列"
+        ]
+      },
+      {
+        "series": "Code 系列",
+        "officialModel": "Code 系列",
+        "driverCenterName": "Code 系列 驱动合集",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "driver_bundle",
+        "officialPage": "https://www.mechrevo.com/cn/downloads",
+        "officialDomains": [
+          "mechrevo.com",
+          "driver.mechrevo.com"
+        ],
+        "matchKeywords": [
+          "Code ",
+          "Code 系列"
+        ]
+      }
+    ]
+  },
+  "lenovo": {
+    "brandName": "联想 Lenovo",
+    "aliases": [
+      "LENOVO",
+      "Lenovo",
+      "联想"
+    ],
+    "officialDomains": [
+      "lenovo.com",
+      "support.lenovo.com",
+      "support.lenovo.com.cn",
+      "download.lenovo.com"
+    ],
+    "supportPage": "https://support.lenovo.com/",
+    "models": [
+      {
+        "series": "Think 系列",
+        "officialModel": "ThinkPad / ThinkCentre / ThinkStation",
+        "driverCenterName": "Lenovo System Update",
+        "version": "5.08.03.59",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "official_assistant",
+        "officialPage": "https://support.lenovo.com/ca/en/downloads/ds012808-lenovo-system-update-for-windows-10-7-32-bit-64-bit-desktop-notebook-workstation",
+        "downloadUrl": "https://download.lenovo.com/pccbbs/thinkvantage_en/system_update_5.08.03.59.exe",
+        "fileName": "lenovo-system-update-5.08.03.59.exe",
+        "sha256": "e66794dc561a3e58e3dc68556eb053ee32b674ac9d99638e473ef7322f353e0d",
+        "officialDomains": [
+          "lenovo.com",
+          "support.lenovo.com",
+          "download.lenovo.com"
+        ],
+        "matchKeywords": [
+          "ThinkPad",
+          "ThinkCentre",
+          "ThinkStation",
+          "ThinkBook"
+        ]
+      },
+      {
+        "series": "Lenovo 消费系列",
+        "officialModel": "Legion / Yoga / IdeaPad / 小新",
+        "driverCenterName": "Lenovo Vantage",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "official_assistant",
+        "officialPage": "https://support.lenovo.com/us/en/videos/vid500028-how-to-get-the-latest-drivers-and-bios-with-lenovo-vantage",
+        "officialDomains": [
+          "lenovo.com",
+          "support.lenovo.com",
+          "apps.microsoft.com"
+        ],
+        "matchKeywords": [
+          "Legion",
+          "Yoga",
+          "IdeaPad",
+          "XiaoXin",
+          "小新",
+          "拯救者"
+        ]
+      }
+    ]
+  },
+  "dell": {
+    "brandName": "戴尔 Dell",
+    "aliases": [
+      "Dell Inc.",
+      "Dell",
+      "戴尔",
+      "ALIENWARE"
+    ],
+    "officialDomains": [
+      "dell.com",
+      "www.dell.com",
+      "downloads.dell.com"
+    ],
+    "supportPage": "https://www.dell.com/support/home",
+    "models": [
+      {
+        "series": "Dell 全系列",
+        "officialModel": "Dell 全系列",
+        "driverCenterName": "Dell SupportAssist",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "official_assistant",
+        "officialPage": "https://www.dell.com/support/contents/en-us/article/product-support/self-support-knowledgebase/software-and-downloads/support-assist/supportassist-for-home",
+        "downloadUrl": "https://downloads.dell.com/serviceability/catalog/SupportAssistInstaller.exe",
+        "fileName": "Dell-SupportAssistInstaller.exe",
+        "officialDomains": [
+          "dell.com",
+          "downloads.dell.com"
+        ],
+        "matchKeywords": [
+          "Inspiron",
+          "XPS",
+          "Latitude",
+          "Alienware",
+          "Precision",
+          "Vostro",
+          "OptiPlex",
+          "Dell"
+        ]
+      }
+    ]
+  },
+  "hp": {
+    "brandName": "惠普 HP",
+    "aliases": [
+      "HP",
+      "HP Inc.",
+      "Hewlett-Packard",
+      "惠普"
+    ],
+    "officialDomains": [
+      "hp.com",
+      "support.hp.com",
+      "ftp.hp.com"
+    ],
+    "supportPage": "https://support.hp.com/",
+    "models": [
+      {
+        "series": "HP 全系列",
+        "officialModel": "HP 全系列",
+        "driverCenterName": "HP Support Assistant",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "official_assistant",
+        "officialPage": "https://support.hp.com/us-en/help/hp-support-assistant",
+        "officialDomains": [
+          "hp.com",
+          "support.hp.com",
+          "ftp.hp.com"
+        ],
+        "matchKeywords": [
+          "Pavilion",
+          "Envy",
+          "Omen",
+          "EliteBook",
+          "ProBook",
+          "ZBook",
+          "Victus",
+          "HP"
+        ]
+      }
+    ]
+  },
+  "asus": {
+    "brandName": "华硕 ASUS",
+    "aliases": [
+      "ASUS",
+      "ASUSTeK COMPUTER INC.",
+      "ASUSTeK",
+      "华硕"
+    ],
+    "officialDomains": [
+      "asus.com",
+      "asus.com.cn",
+      "www.asus.com",
+      "www.asus.com.cn",
+      "apps.microsoft.com"
+    ],
+    "supportPage": "https://www.asus.com/support/",
+    "models": [
+      {
+        "series": "ASUS 全系列",
+        "officialModel": "ROG / TUF / Zenbook / Vivobook / ExpertBook",
+        "driverCenterName": "MyASUS",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "official_assistant",
+        "officialPage": "https://www.asus.com/support/faq/1039718/",
+        "officialDomains": [
+          "asus.com",
+          "asus.com.cn",
+          "apps.microsoft.com"
+        ],
+        "matchKeywords": [
+          "ROG",
+          "TUF",
+          "Zenbook",
+          "Vivobook",
+          "ExpertBook",
+          "ProArt",
+          "ASUS"
+        ]
+      }
+    ]
+  },
+  "acer": {
+    "brandName": "宏碁 Acer",
+    "aliases": [
+      "Acer",
+      "Acer Incorporated",
+      "宏碁"
+    ],
+    "officialDomains": [
+      "acer.com",
+      "acer.com.cn",
+      "www.acer.com",
+      "www.acer.com.cn",
+      "global-download.acer.com",
+      "apps.microsoft.com"
+    ],
+    "supportPage": "https://www.acer.com/support/drivers-and-manuals",
+    "models": [
+      {
+        "series": "Acer 全系列",
+        "officialModel": "Acer 全系列",
+        "driverCenterName": "Acer 序列号检测工具 / Care Center",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "official_assistant",
+        "officialPage": "https://www.acer.com/us-en/support/drivers-and-manuals",
+        "officialDomains": [
+          "acer.com",
+          "global-download.acer.com",
+          "apps.microsoft.com"
+        ],
+        "matchKeywords": [
+          "Swift",
+          "Aspire",
+          "Nitro",
+          "Predator",
+          "TravelMate",
+          "ConceptD",
+          "Acer"
+        ]
+      }
+    ]
+  },
+  "msi": {
+    "brandName": "微星 MSI",
+    "aliases": [
+      "MSI",
+      "Micro-Star International",
+      "Micro-Star International Co., Ltd.",
+      "微星"
+    ],
+    "officialDomains": [
+      "msi.com",
+      "cn.msi.com",
+      "download.msi.com"
+    ],
+    "supportPage": "https://www.msi.com/support/download/",
+    "models": [
+      {
+        "series": "MSI 全系列",
+        "officialModel": "MSI 游戏本 / 主板 / 台式机",
+        "driverCenterName": "MSI Center",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "official_assistant",
+        "officialPage": "https://www.msi.com/Landing/MSI-Center",
+        "downloadUrl": "https://download.msi.com/uti_exe/mb/MSI-Center.zip",
+        "fileName": "MSI-Center.zip",
+        "officialDomains": [
+          "msi.com",
+          "download.msi.com"
+        ],
+        "matchKeywords": [
+          "Stealth",
+          "Raider",
+          "Vector",
+          "Creator",
+          "Modern",
+          "Prestige",
+          "MSI",
+          "MAG",
+          "MEG",
+          "MPG"
+        ]
+      }
+    ]
+  },
+  "huawei": {
+    "brandName": "华为 HUAWEI",
+    "aliases": [
+      "HUAWEI",
+      "Huawei",
+      "华为"
+    ],
+    "officialDomains": [
+      "huawei.com",
+      "consumer.huawei.com",
+      "consumer-tkb.huawei.com"
+    ],
+    "supportPage": "https://consumer.huawei.com/support/",
+    "models": [
+      {
+        "series": "华为 PC",
+        "officialModel": "MateBook / MateStation",
+        "driverCenterName": "华为电脑管家",
+        "version": "14.0.7.260",
+        "os": [
+          "Windows 10",
+          "Windows 11"
+        ],
+        "downloadType": "official_assistant",
+        "officialPage": "https://consumer.huawei.com/en/support/pc-manager/",
+        "downloadUrl": "https://consumer-tkb.huawei.com/weknow/servlet/download/public?contextNo=W00030690&view=true",
+        "fileName": "Huawei-PC-Manager.zip",
+        "officialDomains": [
+          "huawei.com",
+          "consumer.huawei.com",
+          "consumer-tkb.huawei.com"
+        ],
+        "matchKeywords": [
+          "MateBook",
+          "MateStation",
+          "HUAWEI",
+          "Huawei"
+        ]
+      }
+    ]
+  }
+}

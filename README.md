@@ -37,13 +37,13 @@ dotnet build
 dotnet publish -c Release -r win-x64 --self-contained false -o publish
 ```
 
-发布后的程序位于：
+启动程序位于：
 
 ```text
-publish/SystemOptimizerLite.exe
+SystemOptimizerLite-v3.0-lite-win-x64.zip/SystemOptimizerLite.exe
 ```
 
-该发布方式为 framework-dependent，需要目标电脑已安装 .NET 8 Desktop Runtime。
+需要目标电脑已安装 .NET 8 Desktop Runtime。
 
 ## 数据与组件目录
 

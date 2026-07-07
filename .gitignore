@@ -1,6 +1,7 @@
 bin/
 obj/
 publish/
+release-artifacts/
 .agents/
 .codex/
 

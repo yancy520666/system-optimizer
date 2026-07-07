@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
@@ -169,9 +170,13 @@ public static class EnvironmentService
 {
     public static string RuntimeText()
     {
-        var os = Environment.OSVersion.Version;
-        var desktopRuntime = Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "shared", "Microsoft.WindowsDesktop.App"));
-        return os.Major >= 10 && desktopRuntime ? "运行环境正常" : "运行环境异常";
+        var isSupportedWindows = OperatingSystem.IsWindowsVersionAtLeast(10);
+        var runtimeIsSupported = Environment.Version.Major >= 8 ||
+                                 RuntimeInformation.FrameworkDescription.Contains(".NET 8", StringComparison.OrdinalIgnoreCase) ||
+                                 RuntimeInformation.FrameworkDescription.Contains(".NET 9", StringComparison.OrdinalIgnoreCase);
+        var architectureIsSupported = RuntimeInformation.ProcessArchitecture == Architecture.X64;
+
+        return isSupportedWindows && runtimeIsSupported && architectureIsSupported ? "运行环境正常" : "运行环境异常";
     }
 }
 

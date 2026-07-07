@@ -1,6 +1,7 @@
 bin/
 obj/
 publish/
+publish-self-contained*/
 release-artifacts/
 .agents/
 .codex/

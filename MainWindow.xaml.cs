@@ -650,7 +650,21 @@ public partial class MainWindow : Window
 
             AddDriverHealthCard(data);
             var info = data.Device;
-            AddInfoCard("当前设备", $"{info.Manufacturer} · {info.Model}\nSN：{info.SerialNumber}\n匹配结果：{info.MatchSummary}\n缓存时间：{data.CachedAt:yyyy-MM-dd HH:mm:ss}", !info.MatchSuccess);
+            var vendorText = string.IsNullOrWhiteSpace(info.VendorDisplayName) ? "暂无信息" : info.VendorDisplayName;
+            var deviceCard = ActionCard(
+                "当前设备",
+                $"{info.Manufacturer} · {info.Model}\n厂商：{vendorText}\n{info.DeviceIdentifierLabel}：{info.DeviceIdentifierValue}\n缓存时间：{data.CachedAt:yyyy-MM-dd HH:mm:ss}",
+                info.MatchSuccess ? "Border" : "Yellow");
+            var deviceActions = (StackPanel)((Grid)deviceCard.Child).Children[1];
+            var copyIdentifier = SmallButton("复制", () =>
+            {
+                if (!info.CanCopyIdentifier) return;
+                Clipboard.SetText(info.DeviceIdentifierValue);
+                StatusText.Text = $"已复制 {info.DeviceIdentifierLabel}";
+            }, 72);
+            copyIdentifier.IsEnabled = info.CanCopyIdentifier;
+            deviceActions.Children.Add(copyIdentifier);
+            ContentPanel.Children.Add(deviceCard);
             var actionCard = ActionCard("官方驱动中心", string.IsNullOrWhiteSpace(info.SupportPage) ? "未匹配到厂商官网入口。" : info.SupportPage, info.MatchSuccess ? "Green" : "Yellow");
             var actions = (StackPanel)((Grid)actionCard.Child).Children[1];
             if (!string.IsNullOrWhiteSpace(info.DownloadUrl))

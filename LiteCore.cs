@@ -25,9 +25,154 @@ public record CleanerRunSummary(string Mode, int SelectedItems, int FileCount, l
 public record CleanerRunResult(string Output, CleanerRunSummary Summary);
 public record ToolItem(string Id, string Name, string Description, string AssetName, string DownloadUrl, string Sha256, bool Dangerous, List<string> Aliases);
 public record DriverStatusItem(string Name, string Detail, string Status);
-public record DeviceMatchInfo(string Manufacturer, string Model, string SerialNumber, string MatchSummary, string SupportPage, string DownloadUrl, string FileName, bool MatchSuccess);
+public record DeviceIdentity(
+    string BiosManufacturer,
+    string BiosSerialNumber,
+    string ComputerManufacturer,
+    string ComputerModel,
+    string SystemSkuNumber,
+    string ProductVendor,
+    string ProductName,
+    string ProductIdentifyingNumber,
+    string ProductSkuNumber,
+    string BaseBoardManufacturer,
+    string BaseBoardProduct,
+    string BaseBoardSerialNumber);
+public record DeviceDisplayIdentifier(string Label, string Value);
+public record DeviceMatchInfo(
+    string Manufacturer,
+    string Model,
+    string SerialNumber,
+    string MatchSummary,
+    string SupportPage,
+    string DownloadUrl,
+    string FileName,
+    bool MatchSuccess,
+    string VendorDisplayName,
+    string DeviceIdentifierLabel,
+    string DeviceIdentifierValue,
+    bool CanCopyIdentifier);
 public record DriverPageData(DeviceMatchInfo Device, List<DriverStatusItem> Drivers, DateTimeOffset CachedAt);
 public record ComponentStatus(ComponentState State, string Text, string Version, int ReadyCount, int TotalCount, string Error = "");
+
+public static class DeviceDisplayIdentifierExtensions
+{
+    public static bool CanCopy(this DeviceDisplayIdentifier identifier)
+        => !string.IsNullOrWhiteSpace(identifier.Value) && !identifier.Value.Equals("未能读取", StringComparison.OrdinalIgnoreCase);
+}
+
+public static class DeviceIdentifierResolver
+{
+    private const string UnknownValue = "未能读取";
+
+    public static DeviceDisplayIdentifier Resolve(DeviceIdentity identity)
+    {
+        var vendor = ResolveVendor(identity);
+        return vendor switch
+        {
+            "dell" => Pick("Service Tag", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "lenovo" => Pick("主机编号", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "hp" => Pick("序列号", identity.BiosSerialNumber, identity.ProductSkuNumber, identity.SystemSkuNumber, identity.ComputerModel),
+            "asus" => Pick("产品型号", identity.ComputerModel, identity.ProductName, identity.BaseBoardProduct, identity.BiosSerialNumber),
+            "acer" => Pick("SN / SNID", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "msi" => Pick("产品型号", identity.ComputerModel, identity.ProductName, identity.BaseBoardProduct, identity.BiosSerialNumber),
+            "gigabyte" => Pick("产品型号", identity.BaseBoardProduct, identity.ComputerModel, identity.ProductName, identity.BiosSerialNumber),
+            "surface" => Pick("Surface型号", identity.ComputerModel, identity.ProductName),
+            "huawei" => Pick("序列号", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "honor" => Pick("SN号", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "xiaomi" => Pick("SN号", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "mechrevo" => Pick("SN序列号", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "machenike" => Pick("SN序列号", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "thunderobot" => Pick("产品型号", identity.ComputerModel, identity.ProductName, identity.BiosSerialNumber),
+            "hasee" => Pick("SN序列号", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel),
+            "dynabook" => Pick("产品型号", identity.ComputerModel, identity.ProductName, identity.BiosSerialNumber),
+            "mainboard" => Pick("主板型号", identity.BaseBoardProduct, identity.ComputerModel, identity.ProductName),
+            _ => Pick("识别码", identity.BiosSerialNumber, identity.ProductIdentifyingNumber, identity.ComputerModel, identity.ProductName, identity.BaseBoardProduct)
+        };
+    }
+
+    public static string ResolveVendorDisplay(DeviceIdentity identity)
+    {
+        return ResolveVendor(identity) switch
+        {
+            "dell" => "Dell / Alienware",
+            "lenovo" => "Lenovo / ThinkPad",
+            "hp" => "HP / OMEN",
+            "asus" => "ASUS / ROG",
+            "acer" => "Acer",
+            "msi" => "MSI",
+            "gigabyte" => "GIGABYTE / AORUS",
+            "surface" => "Microsoft Surface",
+            "huawei" => "HUAWEI MateBook",
+            "honor" => "HONOR MagicBook",
+            "xiaomi" => "Xiaomi / RedmiBook",
+            "mechrevo" => "机械革命",
+            "machenike" => "机械师",
+            "thunderobot" => "雷神 Thunderobot",
+            "hasee" => "神舟 Hasee",
+            "dynabook" => "Dynabook / Toshiba",
+            "mainboard" => $"{Clean(identity.BaseBoardManufacturer)} 主板",
+            _ => "暂无信息"
+        };
+    }
+
+    public static bool IsValidHardwareValue(string? value)
+    {
+        var text = Clean(value);
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var invalid = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "unknown", "none", "n/a", "not applicable", "not available", "default string",
+            "to be filled by o.e.m.", "to be filled by oem", "system serial number",
+            "system product name", "system manufacturer", "oem", "invalid", "00000000",
+            "0000000000", "0123456789", "123456789"
+        };
+        return !invalid.Contains(text);
+    }
+
+    public static string Clean(string? value) => string.IsNullOrWhiteSpace(value) ? "" : value.Trim();
+
+    private static DeviceDisplayIdentifier Pick(string label, params string[] values)
+    {
+        var value = values.Select(Clean).FirstOrDefault(IsValidHardwareValue);
+        return string.IsNullOrWhiteSpace(value)
+            ? new DeviceDisplayIdentifier("识别码", UnknownValue)
+            : new DeviceDisplayIdentifier(label, value);
+    }
+
+    private static string ResolveVendor(DeviceIdentity identity)
+    {
+        var haystack = string.Join(" ", new[]
+        {
+            identity.ComputerManufacturer, identity.ProductVendor, identity.BiosManufacturer,
+            identity.ComputerModel, identity.ProductName, identity.BaseBoardManufacturer
+        });
+
+        if (Has(haystack, "dell", "alienware")) return "dell";
+        if (Has(haystack, "lenovo", "thinkpad", "thinkbook", "legion")) return "lenovo";
+        if (Has(haystack, "hewlett-packard", "omen") || HasToken(haystack, "hp")) return "hp";
+        if (Has(haystack, "asus", "asustek", "rog", "tuf")) return "asus";
+        if (Has(haystack, "acer")) return "acer";
+        if (Has(haystack, "micro-star") || HasToken(haystack, "msi")) return "msi";
+        if (Has(haystack, "gigabyte", "aorus")) return "gigabyte";
+        if (Has(haystack, "surface") || Has(haystack, "microsoft")) return "surface";
+        if (Has(haystack, "huawei", "matebook")) return "huawei";
+        if (Has(haystack, "honor", "magicbook")) return "honor";
+        if (Has(haystack, "xiaomi", "redmi", "redmibook", "timi")) return "xiaomi";
+        if (Has(haystack, "mechrevo", "机械革命")) return "mechrevo";
+        if (Has(haystack, "machenike", "机械师")) return "machenike";
+        if (Has(haystack, "thunderobot", "雷神", "haier")) return "thunderobot";
+        if (Has(haystack, "hasee", "神舟", "shenzhou")) return "hasee";
+        if (Has(haystack, "dynabook", "toshiba")) return "dynabook";
+        if (!IsValidHardwareValue(identity.ComputerManufacturer) && Has(identity.BaseBoardManufacturer, "asus", "asustek", "micro-star", "msi", "gigabyte", "asrock"))
+            return "mainboard";
+        if (Has(identity.ComputerManufacturer, "tongfang") && Has(haystack, "mechrevo", "机械革命")) return "mechrevo";
+        return "unknown";
+    }
+
+    private static bool Has(string text, params string[] keywords) => keywords.Any(k => text.Contains(k, StringComparison.OrdinalIgnoreCase));
+    private static bool HasToken(string text, string token) => Regex.IsMatch(text, $@"(^|[^A-Za-z0-9]){Regex.Escape(token)}([^A-Za-z0-9]|$)", RegexOptions.IgnoreCase);
+}
 
 public sealed class AppSettings
 {
@@ -1367,7 +1512,10 @@ public sealed class DriverService
             try
             {
                 var cached = JsonSerializer.Deserialize<DriverPageData>(File.ReadAllText(AppPaths.DriverCachePath, Encoding.UTF8), JsonOptions);
-                if (cached != null && DateTimeOffset.Now - cached.CachedAt < TimeSpan.FromHours(12))
+                if (cached != null &&
+                    DateTimeOffset.Now - cached.CachedAt < TimeSpan.FromHours(12) &&
+                    !string.IsNullOrWhiteSpace(cached.Device.DeviceIdentifierLabel) &&
+                    !string.IsNullOrWhiteSpace(cached.Device.DeviceIdentifierValue))
                     return cached;
             }
             catch { }
@@ -1383,33 +1531,69 @@ public sealed class DriverService
         using var device = await PowerShellJsonAsync("""
 $cs = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
-[PSCustomObject]@{ Manufacturer=$cs.Manufacturer; Model=$cs.Model; SerialNumber=$bios.SerialNumber } | ConvertTo-Json -Compress
+$product = Get-CimInstance Win32_ComputerSystemProduct
+$board = Get-CimInstance Win32_BaseBoard
+[PSCustomObject]@{
+  BiosManufacturer=$bios.Manufacturer
+  BiosSerialNumber=$bios.SerialNumber
+  ComputerManufacturer=$cs.Manufacturer
+  ComputerModel=$cs.Model
+  SystemSkuNumber=$cs.SystemSKUNumber
+  ProductVendor=$product.Vendor
+  ProductName=$product.Name
+  ProductIdentifyingNumber=$product.IdentifyingNumber
+  ProductSkuNumber=$product.SKUNumber
+  BaseBoardManufacturer=$board.Manufacturer
+  BaseBoardProduct=$board.Product
+  BaseBoardSerialNumber=$board.SerialNumber
+} | ConvertTo-Json -Compress
 """);
-        var manufacturer = device.RootElement.S("Manufacturer", "未知厂商");
-        var model = device.RootElement.S("Model", "未知型号");
-        var serial = device.RootElement.S("SerialNumber", "未知 SN");
+        var root = device.RootElement;
+        var identity = new DeviceIdentity(
+            root.S("BiosManufacturer"),
+            root.S("BiosSerialNumber"),
+            root.S("ComputerManufacturer"),
+            root.S("ComputerModel"),
+            root.S("SystemSkuNumber"),
+            root.S("ProductVendor"),
+            root.S("ProductName"),
+            root.S("ProductIdentifyingNumber"),
+            root.S("ProductSkuNumber"),
+            root.S("BaseBoardManufacturer"),
+            root.S("BaseBoardProduct"),
+            root.S("BaseBoardSerialNumber"));
+        var manufacturer = DeviceIdentifierResolver.IsValidHardwareValue(identity.ComputerManufacturer) ? DeviceIdentifierResolver.Clean(identity.ComputerManufacturer) : "未知厂商";
+        var model = DeviceIdentifierResolver.IsValidHardwareValue(identity.ComputerModel) ? DeviceIdentifierResolver.Clean(identity.ComputerModel) :
+            DeviceIdentifierResolver.IsValidHardwareValue(identity.ProductName) ? DeviceIdentifierResolver.Clean(identity.ProductName) : "未知型号";
+        var identifier = DeviceIdentifierResolver.Resolve(identity);
+        var serial = identifier.CanCopy() ? identifier.Value : "未知 SN";
+        var vendorDisplay = DeviceIdentifierResolver.ResolveVendorDisplay(identity);
         using var centers = JsonUtil.ReadDocument(AppPaths.DataFile("driver-centers.json"));
         foreach (var brand in centers.RootElement.EnumerateObject())
         {
             var aliases = brand.Value.TryGetProperty("aliases", out var a) ? a.EnumerateArray().Select(x => x.ToString()).ToList() : new();
-            var brandMatched = aliases.Any(x => manufacturer.Contains(x, StringComparison.OrdinalIgnoreCase)) || manufacturer.Contains(brand.Name, StringComparison.OrdinalIgnoreCase);
+            var brandMatched = aliases.Any(x => manufacturer.Contains(x, StringComparison.OrdinalIgnoreCase) || vendorDisplay.Contains(x, StringComparison.OrdinalIgnoreCase)) ||
+                               manufacturer.Contains(brand.Name, StringComparison.OrdinalIgnoreCase) ||
+                               vendorDisplay.Contains(brand.Name, StringComparison.OrdinalIgnoreCase);
             if (!brandMatched) continue;
             var support = brand.Value.S("supportPage");
-            var queryPage = SupportQueryUrl(brand.Name, support, serial, model);
+            var queryPage = SupportQueryUrl(brand.Name, support, identifier.Value, model);
             if (brand.Value.TryGetProperty("models", out var models))
             {
                 foreach (var candidate in models.EnumerateArray())
                 {
                     var keywords = candidate.TryGetProperty("matchKeywords", out var ks) ? ks.EnumerateArray().Select(x => x.ToString()) : Enumerable.Empty<string>();
-                    if (keywords.Any(k => model.Contains(k, StringComparison.OrdinalIgnoreCase) || serial.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                    if (keywords.Any(k => model.Contains(k, StringComparison.OrdinalIgnoreCase) || identifier.Value.Contains(k, StringComparison.OrdinalIgnoreCase)))
                     {
-                        return new DeviceMatchInfo(manufacturer, model, serial, candidate.S("driverCenterName", brand.Value.S("brandName", brand.Name)), candidate.S("officialPage", queryPage), candidate.S("downloadUrl"), candidate.S("fileName"), true);
+                        var matchedVendor = candidate.S("driverCenterName", brand.Value.S("brandName", vendorDisplay));
+                        return new DeviceMatchInfo(manufacturer, model, serial, matchedVendor, candidate.S("officialPage", queryPage), candidate.S("downloadUrl"), candidate.S("fileName"), true, matchedVendor, identifier.Label, identifier.Value, identifier.CanCopy());
                     }
                 }
             }
-            return new DeviceMatchInfo(manufacturer, model, serial, brand.Value.S("brandName", brand.Name), queryPage, "", "", true);
+            var brandName = brand.Value.S("brandName", vendorDisplay);
+            return new DeviceMatchInfo(manufacturer, model, serial, brandName, queryPage, "", "", true, brandName, identifier.Label, identifier.Value, identifier.CanCopy());
         }
-        return new DeviceMatchInfo(manufacturer, model, serial, "未匹配到本地厂商库，请手动打开厂商官网。", "", "", "", false);
+        return new DeviceMatchInfo(manufacturer, model, serial, "暂无信息", "", "", "", false, vendorDisplay, identifier.Label, identifier.Value, identifier.CanCopy());
     }
 
     public async Task<string> DownloadDriverPackageAsync(DeviceMatchInfo info, CancellationToken token)
@@ -1471,7 +1655,8 @@ Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -and $_.PNPClass -in @(
 
     private static string SupportQueryUrl(string brand, string fallback, string serial, string model)
     {
-        var sn = Uri.EscapeDataString(string.IsNullOrWhiteSpace(serial) || serial.Contains("未知", StringComparison.OrdinalIgnoreCase) ? model : serial);
+        var source = DeviceIdentifierResolver.IsValidHardwareValue(serial) && !serial.Equals("未能读取", StringComparison.OrdinalIgnoreCase) ? serial : model;
+        var sn = Uri.EscapeDataString(DeviceIdentifierResolver.Clean(source));
         var query = string.IsNullOrWhiteSpace(sn) ? "" : sn;
         return brand.ToLowerInvariant() switch
         {

@@ -75,7 +75,7 @@
     </Window.Resources>
 
     <Border BorderThickness="1" BorderBrush="{DynamicResource Border}" CornerRadius="8" Background="{DynamicResource Bg}" SnapsToDevicePixels="True">
-        <Grid>
+        <Grid x:Name="WindowRootGrid">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="198"/>
                 <ColumnDefinition Width="*"/>
@@ -143,30 +143,32 @@
 
                 <TextBlock x:Name="StatusText" Grid.Row="3" Text="就绪" Foreground="{DynamicResource Muted}" Margin="32,8,30,14"/>
 
-                <Border x:Name="HoverInfoPopup"
-                        Grid.RowSpan="4"
-                        Panel.ZIndex="80"
-                        Visibility="Collapsed"
-                        IsHitTestVisible="False"
-                        Width="460"
-                        MaxWidth="520"
-                        Background="{DynamicResource Panel2}"
-                        BorderBrush="{DynamicResource Border}"
-                        BorderThickness="1"
-                        CornerRadius="8"
-                        Padding="12"
-                        HorizontalAlignment="Left"
-                        VerticalAlignment="Top">
-                    <Border.RenderTransform>
-                        <TranslateTransform x:Name="HoverInfoTransform"/>
-                    </Border.RenderTransform>
-                    <TextBlock x:Name="HoverInfoText"
-                               Foreground="{DynamicResource Text}"
-                               TextWrapping="Wrap"
-                               LineHeight="22"
-                               FontSize="13"/>
-                </Border>
             </Grid>
+
+            <Border x:Name="HoverInfoPopup"
+                    Grid.ColumnSpan="2"
+                    Panel.ZIndex="100"
+                    Visibility="Collapsed"
+                    Opacity="0"
+                    IsHitTestVisible="False"
+                    Width="460"
+                    MaxWidth="520"
+                    Background="{DynamicResource Panel2}"
+                    BorderBrush="{DynamicResource Border}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="10,7,10,8"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Top">
+                <Border.RenderTransform>
+                    <TranslateTransform x:Name="HoverInfoTransform"/>
+                </Border.RenderTransform>
+                <TextBlock x:Name="HoverInfoText"
+                           Foreground="{DynamicResource Text}"
+                           TextWrapping="Wrap"
+                           LineHeight="19"
+                           FontSize="13"/>
+            </Border>
         </Grid>
     </Border>
 </Window>

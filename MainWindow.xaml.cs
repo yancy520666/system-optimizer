@@ -10,7 +10,9 @@ using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 
 namespace SystemOptimizerLite;
 
@@ -43,12 +45,26 @@ public partial class MainWindow : Window
     private DownloadFailure? _lastDownloadFailure;
     private const string HelpDocumentUrl = "https://yangg-app.notion.site/system-optimizer-help?source=copy_link";
     private const string ManualDownloadUrl = "https://yangg-app.notion.site/system-optimizer-tools-download?source=copy_link";
+    private readonly DispatcherTimer _hoverShowTimer = new() { Interval = TimeSpan.FromMilliseconds(600) };
+    private static readonly TimeSpan HoverInitialDelay = TimeSpan.FromMilliseconds(600);
+    private static readonly TimeSpan HoverSwitchDelay = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan HoverSwitchGracePeriod = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan HoverFadeInDuration = TimeSpan.FromMilliseconds(90);
+    private static readonly TimeSpan HoverFadeOutDuration = TimeSpan.FromMilliseconds(80);
+    private string? _pendingHoverText;
+    private Point _lastHoverMousePosition;
+    private FrameworkElement? _currentHoverTarget;
+    private bool _isHoverInfoVisible;
+    private bool _recentVisibleHoverClosed;
+    private DateTime _lastVisibleHoverClosedAt = DateTime.MinValue;
+    private int _hoverGeneration;
 
     private sealed record DownloadFailure(string Page, string Module, string Reason, string TargetDirectory, string Instruction);
 
     public MainWindow()
     {
         InitializeComponent();
+        _hoverShowTimer.Tick += (_, _) => ShowHoverInfoNow();
         SourceInitialized += (_, _) => EnableRoundedWindowCorners();
         _settings = SettingsService.Load();
         _active = "系统优化";
@@ -221,7 +237,7 @@ public partial class MainWindow : Window
         card.Height = 84;
         AttachHoverInfo(card, item.Description);
         var canToggle = enabled && !_busyOptimizerIds.Contains(item.Id);
-        card.Cursor = canToggle ? Cursors.Hand : Cursors.Arrow;
+        card.Cursor = Cursors.Arrow;
         card.Opacity = canToggle ? 1 : 0.48;
         if (applied) card.BorderBrush = BrushOf("Green");
 
@@ -255,10 +271,6 @@ public partial class MainWindow : Window
         root.Children.Add(copy);
         root.Children.Add(state);
         card.Child = root;
-        if (canToggle)
-        {
-            card.MouseLeftButtonUp += async (_, _) => await ToggleOptimizerAsync(item, applied);
-        }
         return card;
     }
 
@@ -1008,41 +1020,91 @@ public partial class MainWindow : Window
     private void AttachHoverInfo(FrameworkElement element, string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
-        element.MouseEnter += (_, e) =>
+        element.MouseEnter += (_, e) => StartHoverInfoDelay(element, text, e);
+        element.MouseMove += (_, e) => UpdateHoverInfoPosition(e);
+        element.MouseLeave += (_, _) => StartHoverInfoHideDelay(element);
+        element.Unloaded += (_, _) =>
         {
-            ShowHoverInfo(text);
-            MoveHoverInfo(e);
+            if (ReferenceEquals(_currentHoverTarget, element))
+                HideHoverInfo();
         };
-        element.MouseMove += (_, e) => MoveHoverInfo(e);
-        element.MouseLeave += (_, _) => HideHoverInfo();
-        element.Unloaded += (_, _) => HideHoverInfo();
     }
 
-    private void ShowHoverInfo(string text)
+    private void StartHoverInfoDelay(FrameworkElement target, string text, MouseEventArgs e)
     {
-        HoverInfoText.Text = text;
+        _hoverShowTimer.Stop();
+
+        var targetChanged = _currentHoverTarget is not null && !ReferenceEquals(_currentHoverTarget, target);
+        var hoverVisualStillOpen = HoverInfoPopup.Visibility == Visibility.Visible && _isHoverInfoVisible;
+        var recentVisibleSwitch = _recentVisibleHoverClosed && DateTime.UtcNow - _lastVisibleHoverClosedAt <= HoverSwitchGracePeriod;
+        var switchFromVisibleCard = (targetChanged && hoverVisualStillOpen) || recentVisibleSwitch;
+        var generation = ++_hoverGeneration;
+
+        if (targetChanged && hoverVisualStillOpen)
+            HideHoverInfoAnimated(generation, clearState: false);
+
+        _recentVisibleHoverClosed = false;
+        _currentHoverTarget = target;
+        _pendingHoverText = text;
+        _lastHoverMousePosition = e.GetPosition(WindowRootGrid);
+        _hoverShowTimer.Interval = switchFromVisibleCard ? HoverSwitchDelay : HoverInitialDelay;
+        _hoverShowTimer.Start();
+    }
+
+    private void UpdateHoverInfoPosition(MouseEventArgs e)
+    {
+        _lastHoverMousePosition = e.GetPosition(WindowRootGrid);
+        if (_isHoverInfoVisible)
+            MoveHoverInfo(_lastHoverMousePosition);
+    }
+
+    private void StartHoverInfoHideDelay(FrameworkElement target)
+    {
+        if (!ReferenceEquals(_currentHoverTarget, target)) return;
+        _hoverShowTimer.Stop();
+        var wasVisible = _isHoverInfoVisible || HoverInfoPopup.Visibility == Visibility.Visible;
+        if (wasVisible)
+        {
+            _recentVisibleHoverClosed = true;
+            _lastVisibleHoverClosedAt = DateTime.UtcNow;
+        }
+        HideHoverInfoAnimated(++_hoverGeneration, clearState: true);
+    }
+
+    private void ShowHoverInfoNow()
+    {
+        _hoverShowTimer.Stop();
+        if (_currentHoverTarget is null || string.IsNullOrWhiteSpace(_pendingHoverText)) return;
+        if (!_currentHoverTarget.IsMouseOver) return;
+
+        var generation = ++_hoverGeneration;
+        HoverInfoText.Text = _pendingHoverText;
         HoverInfoPopup.Visibility = Visibility.Visible;
+        _isHoverInfoVisible = true;
+        _recentVisibleHoverClosed = false;
         HoverInfoPopup.UpdateLayout();
+        MoveHoverInfo(_lastHoverMousePosition);
+        FadeHoverInfo(to: 1, HoverFadeInDuration, generation);
     }
 
-    private void MoveHoverInfo(MouseEventArgs e)
+    private void MoveHoverInfo(Point pointer)
     {
-        if (HoverInfoPopup.Visibility != Visibility.Visible) return;
+        if (!_isHoverInfoVisible || HoverInfoPopup.Visibility != Visibility.Visible) return;
 
-        const double offset = 18;
+        const double offsetX = 14;
+        const double offsetY = 18;
         const double edgePadding = 10;
-        var pointer = e.GetPosition(MainContentGrid);
         HoverInfoPopup.UpdateLayout();
 
         var popupWidth = HoverInfoPopup.ActualWidth > 0 ? HoverInfoPopup.ActualWidth : HoverInfoPopup.Width;
         var popupHeight = HoverInfoPopup.ActualHeight > 0 ? HoverInfoPopup.ActualHeight : HoverInfoPopup.DesiredSize.Height;
-        var x = pointer.X + offset;
-        var y = pointer.Y + offset;
+        var x = pointer.X + offsetX;
+        var y = pointer.Y + offsetY;
 
-        if (x + popupWidth + edgePadding > MainContentGrid.ActualWidth)
-            x = pointer.X - popupWidth - offset;
-        if (y + popupHeight + edgePadding > MainContentGrid.ActualHeight)
-            y = pointer.Y - popupHeight - offset;
+        if (x + popupWidth + edgePadding > WindowRootGrid.ActualWidth)
+            x = pointer.X - popupWidth - offsetX;
+        if (y + popupHeight + edgePadding > WindowRootGrid.ActualHeight)
+            y = pointer.Y - popupHeight - offsetY;
 
         HoverInfoTransform.X = Math.Max(edgePadding, x);
         HoverInfoTransform.Y = Math.Max(edgePadding, y);
@@ -1050,8 +1112,57 @@ public partial class MainWindow : Window
 
     private void HideHoverInfo()
     {
+        _hoverShowTimer.Stop();
+        ++_hoverGeneration;
+        _recentVisibleHoverClosed = false;
+        _lastVisibleHoverClosedAt = DateTime.MinValue;
+        ClearHoverInfoState();
+    }
+
+    private void HideHoverInfoAnimated(int generation, bool clearState)
+    {
+        if (HoverInfoPopup.Visibility != Visibility.Visible)
+        {
+            if (clearState) ClearHoverInfoState();
+            return;
+        }
+
+        _isHoverInfoVisible = false;
+        FadeHoverInfo(to: 0, HoverFadeOutDuration, generation, () =>
+        {
+            if (generation != _hoverGeneration) return;
+            HoverInfoPopup.Visibility = Visibility.Collapsed;
+            if (clearState) ClearHoverInfoState();
+        });
+    }
+
+    private void FadeHoverInfo(double to, TimeSpan duration, int generation, Action? completed = null)
+    {
+        HoverInfoPopup.BeginAnimation(OpacityProperty, null);
+        var animation = new DoubleAnimation
+        {
+            From = HoverInfoPopup.Opacity,
+            To = to,
+            Duration = new Duration(duration),
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+        };
+        animation.Completed += (_, _) =>
+        {
+            if (generation == _hoverGeneration)
+                completed?.Invoke();
+        };
+        HoverInfoPopup.BeginAnimation(OpacityProperty, animation);
+    }
+
+    private void ClearHoverInfoState()
+    {
+        HoverInfoPopup.BeginAnimation(OpacityProperty, null);
         HoverInfoPopup.Visibility = Visibility.Collapsed;
+        HoverInfoPopup.Opacity = 0;
         HoverInfoText.Text = string.Empty;
+        _pendingHoverText = null;
+        _currentHoverTarget = null;
+        _isHoverInfoVisible = false;
     }
 
     private Border CardBorder() => new()

@@ -90,6 +90,7 @@ public partial class MainWindow : Window
     private async Task SelectPageAsync(string name)
     {
         var renderVersion = ++_renderVersion;
+        HideHoverInfo();
         _active = name;
         _settings.LastSelectedPage = name;
         SettingsService.Save(_settings);
@@ -218,16 +219,7 @@ public partial class MainWindow : Window
         var card = CardBorder();
         card.Padding = new Thickness(12, 10, 12, 10);
         card.Height = 84;
-        card.ToolTip = new ToolTip
-        {
-            Content = new TextBlock
-            {
-                Text = item.Description,
-                TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 520,
-                LineHeight = 22
-            }
-        };
+        AttachHoverInfo(card, item.Description);
         var canToggle = enabled && !_busyOptimizerIds.Contains(item.Id);
         card.Cursor = canToggle ? Cursors.Hand : Cursors.Arrow;
         card.Opacity = canToggle ? 1 : 0.48;
@@ -735,16 +727,7 @@ public partial class MainWindow : Window
         var card = CardBorder();
         card.Height = 112;
         card.BorderBrush = BrushOf("Green");
-        card.ToolTip = new ToolTip
-        {
-            Content = new TextBlock
-            {
-                Text = tool.Description,
-                TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 520,
-                LineHeight = 22
-            }
-        };
+        AttachHoverInfo(card, tool.Description);
 
         var root = new Grid();
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -1021,6 +1004,55 @@ public partial class MainWindow : Window
     }
 
     private UniformGrid CreateCardGrid() => new() { Columns = 2, Margin = new Thickness(0, 0, 0, 4) };
+
+    private void AttachHoverInfo(FrameworkElement element, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        element.MouseEnter += (_, e) =>
+        {
+            ShowHoverInfo(text);
+            MoveHoverInfo(e);
+        };
+        element.MouseMove += (_, e) => MoveHoverInfo(e);
+        element.MouseLeave += (_, _) => HideHoverInfo();
+        element.Unloaded += (_, _) => HideHoverInfo();
+    }
+
+    private void ShowHoverInfo(string text)
+    {
+        HoverInfoText.Text = text;
+        HoverInfoPopup.Visibility = Visibility.Visible;
+        HoverInfoPopup.UpdateLayout();
+    }
+
+    private void MoveHoverInfo(MouseEventArgs e)
+    {
+        if (HoverInfoPopup.Visibility != Visibility.Visible) return;
+
+        const double offset = 18;
+        const double edgePadding = 10;
+        var pointer = e.GetPosition(MainContentGrid);
+        HoverInfoPopup.UpdateLayout();
+
+        var popupWidth = HoverInfoPopup.ActualWidth > 0 ? HoverInfoPopup.ActualWidth : HoverInfoPopup.Width;
+        var popupHeight = HoverInfoPopup.ActualHeight > 0 ? HoverInfoPopup.ActualHeight : HoverInfoPopup.DesiredSize.Height;
+        var x = pointer.X + offset;
+        var y = pointer.Y + offset;
+
+        if (x + popupWidth + edgePadding > MainContentGrid.ActualWidth)
+            x = pointer.X - popupWidth - offset;
+        if (y + popupHeight + edgePadding > MainContentGrid.ActualHeight)
+            y = pointer.Y - popupHeight - offset;
+
+        HoverInfoTransform.X = Math.Max(edgePadding, x);
+        HoverInfoTransform.Y = Math.Max(edgePadding, y);
+    }
+
+    private void HideHoverInfo()
+    {
+        HoverInfoPopup.Visibility = Visibility.Collapsed;
+        HoverInfoText.Text = string.Empty;
+    }
 
     private Border CardBorder() => new()
     {

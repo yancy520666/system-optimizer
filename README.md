@@ -85,10 +85,10 @@ SystemOptimizerLite-v3.0-lite-win-x64.zip/SystemOptimizerLite.exe
 
 本项目目前涉及的第三方组件包括但不限于：
 
-OptimizerNXT：用于提供部分 Windows 优化策略与 YAML 配置支持。该组件遵循其原项目许可证发布。
-BleachBit：用于提供系统清理能力。该组件遵循其原项目许可证发布。
-Microsoft .NET Desktop Runtime：用于提供程序运行环境，由 Microsoft 官方发布。
-部分第三方应用或程序脚本，仅做本地端整合使用。
+- OptimizerNXT：用于提供部分 Windows 优化策略与 YAML 配置支持。该组件遵循其原项目许可证发布。
+- BleachBit：用于提供系统清理能力。该组件遵循其原项目许可证发布。
+- Microsoft .NET Desktop Runtime：用于提供程序运行环境，由 Microsoft 官方发布。
+- 部分第三方应用或程序脚本，仅做本地端整合使用。
 
 本项目仅对相关功能进行桌面端整合、调用、跳转或轻量化封装，不声称拥有上述第三方组件的版权，也不代表与相关项目作者、公司或组织存在官方合作、授权、背书或隶属关系。
 

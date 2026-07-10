@@ -17,25 +17,34 @@ using System.Xml.Linq;
 namespace SystemOptimizerLite;
 
 public enum ComponentState { Missing, Downloading, Online, Error }
-public enum OptimizationLiveState { Default, Optimized, Mixed, ExternallyManaged, RestartRequired, Unsupported, Unknown }
-public enum OptimizationTargetState { Default, Unoptimized, Optimized, Diverged, Unavailable, ExternallyManaged, Unknown }
+public enum OptimizationLiveState { Default, Optimized, OptimizedWithSkips, Mixed, NeedsReview, SafetyBlocked, ExternallyManaged, RestartRequired, Unsupported, Unknown }
+public enum OptimizationTargetState { Default, Unoptimized, Optimized, Diverged, Unavailable, Skipped, ExternallyManaged, Unknown }
 public enum RestoreItemStatus { Restored, AlreadyDefault, Partial, Skipped, Failed, RestartRequired }
 public enum IdentityConfidence { High, Medium, Low }
+public enum TargetApplicability { Applicable, NotApplicable, OptionalMissing, Unsafe, UnsupportedBuild, QueryFailed }
+public enum TargetOutcome { Optimized, NotOptimized, Skipped, Failed, RestartRequired, Unknown }
+public enum ExecutionDisposition { Allowed, OptionalWhenAbsent, BlockedUnsafe, Unsupported }
+public enum RollbackCapability { None, SafeBaseline, ExactSnapshot }
+public enum CleanerSafetyTier { Recommended, BalancedOnly, Sensitive, Unsupported, ReviewRequired }
+public enum CleanerDefaultProfile { Balanced }
 
 public record CategoryInfo(string Name, string Description);
 public record OptimizerItem(string Id, string Title, string Description, string Tab, string Group, string Risk, string YamlFile, bool SigRequired, string Icon, string Windows, string Category, bool DefaultChecked, bool EnabledByDefault, int Order);
-public record CleanerItem(string Id, string CleanerId, string OptionId, string Title, string Description, string Group, string Risk, bool DefaultSelected);
+public record CleanerItem(string Id, string CleanerId, string OptionId, string Title, string Description, string Group, string Risk, bool DefaultSelected, CleanerSafetyTier Safety = CleanerSafetyTier.ReviewRequired, bool Applicable = true, string SelectionReason = "", string Warning = "");
 public record CleanerPathInfo(string Path, string SizeText, long Bytes);
 public record CleanerRunSummary(string Mode, int SelectedItems, int FileCount, long Bytes, string SpaceText, string OutputPreview, bool IsLoading, List<CleanerPathInfo> TopPaths);
 public record CleanerRunResult(string Output, CleanerRunSummary Summary);
 public record ToolItem(string Id, string Name, string Description, string AssetName, string DownloadUrl, string Sha256, bool Dangerous, List<string> Aliases);
 public record DriverStatusItem(string Name, string Detail, string Status);
-public record OptimizationContract(string Id, string YamlSha256, string SigSha256);
-public record OptimizationTargetInfo(string Kind, string Target, OptimizationTargetState State, string Detail);
-public record OptimizationStateInfo(string Id, OptimizationLiveState State, string Detail, int MatchedTargets, int TotalTargets, List<OptimizationTargetInfo>? Targets = null)
+public record OptimizationContract(string Id, string YamlSha256, string SigSha256, string Profile = "standard", string ContractSha256 = "");
+public record OptimizationTargetInfo(string Kind, string Target, OptimizationTargetState State, string Detail, string TargetId = "", TargetApplicability Applicability = TargetApplicability.Applicable, TargetOutcome Outcome = TargetOutcome.Unknown, ExecutionDisposition Disposition = ExecutionDisposition.Allowed, string SkipReason = "");
+public record OptimizationStateInfo(string Id, OptimizationLiveState State, string Detail, int MatchedTargets, int TotalTargets, List<OptimizationTargetInfo>? Targets = null, int SkippedTargets = 0, RollbackCapability Rollback = RollbackCapability.SafeBaseline)
 {
     public IReadOnlyList<OptimizationTargetInfo> TargetDetails => Targets ?? [];
 }
+public record OptimizationTargetAssessment(string TargetId, string Kind, string Target, TargetApplicability Applicability, TargetOutcome Outcome, ExecutionDisposition Disposition, string Detail, string Evidence);
+public record OptimizationSkipDecision(string ItemId, string TargetId, string ContractSha256, int WindowsBuild, string TargetDigest, string Reason, DateTimeOffset ConfirmedAt);
+public record OptimizationApplyPlan(OptimizerItem Item, List<OptimizationTargetAssessment> Targets, int ApplicableCount, int SkippedCount, int BlockedCount, bool RequiresConfirmation, DateTimeOffset CreatedAt);
 public record RestorePlanItem(string Id, string Title, OptimizationLiveState CurrentState, string Detail, bool WillChange, bool RequiresRestart);
 public record RestorePlan(List<RestorePlanItem> Items, DateTimeOffset CreatedAt)
 {
@@ -562,9 +571,11 @@ public sealed class OptimizerService
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
     private int _installing;
     private string _installMessage = "";
+    private ComponentStatus? _componentStatusCache;
+    private DateTimeOffset _componentStatusCacheAt;
     private static IReadOnlyDictionary<string, OptimizationContract>? _contracts;
-    private static HashSet<string>? _disabledTaskCache;
-    private static DateTimeOffset _disabledTaskCacheAt;
+    private static ScheduledTaskInventory? _taskInventoryCache;
+    private static DateTimeOffset _taskInventoryCacheAt;
     private static readonly object LiveStateSync = new();
     private static Dictionary<string, OptimizationStateInfo>? _liveStateCache;
     private static DateTimeOffset _liveStateCacheAt;
@@ -585,12 +596,20 @@ public sealed class OptimizerService
     public IReadOnlyDictionary<string, OptimizationContract> GetContracts()
     {
         if (_contracts != null) return _contracts;
-        using var doc = JsonUtil.ReadDocument(AppPaths.DataFile("optimization-contracts.json"));
+        var contractPath = AppPaths.DataFile("optimization-contracts.json");
+        var contractFileHash = DownloadService.Sha256(contractPath);
+        using var doc = JsonUtil.ReadDocument(contractPath);
         var result = new Dictionary<string, OptimizationContract>(StringComparer.OrdinalIgnoreCase);
         if (doc.RootElement.TryGetProperty("contracts", out var contracts))
         {
             foreach (var property in contracts.EnumerateObject())
-                result[property.Name] = new OptimizationContract(property.Name, property.Value.S("yamlSha256"), property.Value.S("sigSha256"));
+            {
+                var yamlHash = property.Value.S("yamlSha256");
+                var sigHash = property.Value.S("sigSha256");
+                var profile = property.Value.S("profile", "standard");
+                var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{contractFileHash}|{property.Name}|{yamlHash}|{sigHash}|{profile}")));
+                result[property.Name] = new OptimizationContract(property.Name, yamlHash, sigHash, profile, digest);
+            }
         }
         _contracts = result;
         return result;
@@ -598,11 +617,18 @@ public sealed class OptimizerService
 
     public async Task<ComponentStatus> GetComponentStatusAsync()
     {
+        if (!IsInstalling && _componentStatusCache != null && DateTimeOffset.Now - _componentStatusCacheAt < TimeSpan.FromSeconds(15))
+            return _componentStatusCache;
         var items = await GetItemsAsync();
-        var ready = ReadyCount(items);
+        var exeValid = IsExeValid();
+        var ready = ReadyCount(items, exeValid);
         if (IsInstalling) return new ComponentStatus(ComponentState.Downloading, string.IsNullOrWhiteSpace(_installMessage) ? "获取远端服务中" : _installMessage, PinnedVersion, ready, items.Count);
-        if (ready == items.Count && IsExeValid()) return new ComponentStatus(ComponentState.Online, $"OptimizerNXT 在线 · YAML {ready}/{items.Count}", PinnedVersion, ready, items.Count);
-        return new ComponentStatus(ComponentState.Missing, $"Optimizer 组件离线 · YAML {ready}/{items.Count}", PinnedVersion, ready, items.Count);
+        var result = ready == items.Count && exeValid
+            ? new ComponentStatus(ComponentState.Online, $"OptimizerNXT 在线 · YAML {ready}/{items.Count}", PinnedVersion, ready, items.Count)
+            : new ComponentStatus(ComponentState.Missing, $"Optimizer 组件离线 · YAML {ready}/{items.Count}", PinnedVersion, ready, items.Count);
+        _componentStatusCache = result;
+        _componentStatusCacheAt = DateTimeOffset.Now;
+        return result;
     }
 
     public async Task<bool> IsAppliedAsync(string id)
@@ -659,11 +685,46 @@ public sealed class OptimizerService
         }
     }
 
+    public async Task<OptimizationApplyPlan> BuildApplyPlanAsync(OptimizerItem item, bool forceRefresh = true)
+    {
+        var live = (await GetLiveStatesAsync(new[] { item }, forceRefresh))[item.Id];
+        var targets = live.TargetDetails.Select(x => new OptimizationTargetAssessment(
+            string.IsNullOrWhiteSpace(x.TargetId) ? $"{x.Kind}:{StableTargetDigest(x.Target)}" : x.TargetId,
+            x.Kind, x.Target, x.Applicability, x.Outcome, x.Disposition, x.Detail,
+            x.State switch
+            {
+                OptimizationTargetState.Optimized => "当前值与安全契约一致",
+                OptimizationTargetState.Unavailable => "目标不存在",
+                OptimizationTargetState.Skipped => "安全契约明确阻止",
+                OptimizationTargetState.Unknown => "读取或验证失败",
+                _ => "当前值尚未达到优化状态"
+            })).ToList();
+        var applicable = targets.Count(x => x.Applicability == TargetApplicability.Applicable);
+        var skipped = targets.Count(x => x.Applicability is TargetApplicability.NotApplicable or TargetApplicability.OptionalMissing or TargetApplicability.Unsafe or TargetApplicability.UnsupportedBuild);
+        var blocked = targets.Count(x => x.Applicability == TargetApplicability.QueryFailed || x.Disposition == ExecutionDisposition.Unsupported);
+        return new OptimizationApplyPlan(item, targets, applicable, skipped, blocked, skipped > 0, DateTimeOffset.Now);
+    }
+
+    public async Task<int> ConfirmSkippedTargetsAsync(OptimizerItem item)
+    {
+        var live = (await GetLiveStatesAsync(new[] { item }, forceRefresh: true))[item.Id];
+        var skipped = live.TargetDetails.Where(x => x.Applicability is TargetApplicability.NotApplicable or TargetApplicability.OptionalMissing or TargetApplicability.Unsafe or TargetApplicability.UnsupportedBuild).ToList();
+        var state = ReadMutableState();
+        var contractHash = GetContracts().TryGetValue(item.Id, out var contract) ? contract.ContractSha256 : "";
+        state.SkipDecisions.RemoveAll(x => x.ItemId.Equals(item.Id, StringComparison.OrdinalIgnoreCase));
+        foreach (var target in skipped)
+            state.SkipDecisions.Add(new OptimizationSkipDecision(item.Id, target.TargetId, contractHash, Environment.OSVersion.Version.Build, StableTargetDigest(target.Target), string.IsNullOrWhiteSpace(target.SkipReason) ? "本机不适用或安全阻止" : target.SkipReason, DateTimeOffset.Now));
+        WriteState(state);
+        return skipped.Count;
+    }
+
     private static Dictionary<string, OptimizationStateInfo> ScanLiveStates(List<OptimizerItem> items)
     {
-        var disabledTasks = QueryDisabledTasks();
+        var tasks = QueryScheduledTaskInventory();
+        var state = ReadMutableState();
+        var exactSnapshots = state.Applied.Where(x => x.Value.Snapshot != null).Select(x => x.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var result = new Dictionary<string, OptimizationStateInfo>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in items) result[item.Id] = EvaluateLiveState(item, disabledTasks);
+        foreach (var item in items) result[item.Id] = EvaluateLiveState(item, tasks, exactSnapshots.Contains(item.Id));
         return result;
     }
 
@@ -674,8 +735,8 @@ public sealed class OptimizerService
     {
         lock (LiveStateSync)
         {
-            _disabledTaskCache = null;
-            _disabledTaskCacheAt = default;
+            _taskInventoryCache = null;
+            _taskInventoryCacheAt = default;
             _liveStateCache = null;
             _liveStateCacheAt = default;
         }
@@ -690,7 +751,7 @@ public sealed class OptimizerService
         var plan = items.Select(item =>
         {
             var state = states[item.Id];
-            var willChange = state.State is OptimizationLiveState.Optimized or OptimizationLiveState.Mixed or OptimizationLiveState.RestartRequired;
+            var willChange = state.State is OptimizationLiveState.Optimized or OptimizationLiveState.OptimizedWithSkips or OptimizationLiveState.Mixed or OptimizationLiveState.RestartRequired;
             return new RestorePlanItem(item.Id, item.Title, state.State, state.Detail, willChange, state.State == OptimizationLiveState.RestartRequired);
         }).ToList();
         var legacy = selected == null && (ReadMutableState().Applied.ContainsKey("DisableWindowsDefenderModern") || HasLegacyDefenderChanges());
@@ -723,23 +784,118 @@ public sealed class OptimizerService
             var verified = (await GetLiveStatesAsync(new[] { item }))[item.Id];
             var failed = actionResults.Where(x => !x.Ok).ToList();
             var status = verified.State == OptimizationLiveState.Default && failed.Count == 0 ? RestoreItemStatus.Restored : failed.Count == actionResults.Count && failed.Count > 0 ? RestoreItemStatus.Failed : RestoreItemStatus.Partial;
-            var detail = status == RestoreItemStatus.Restored ? "已恢复并通过实时验证。" : string.Join("；", failed.Take(4).Select(x => $"{x.Target}: {x.Message}"));
+            var verificationDelta = verified.TargetDetails.Where(x => x.Applicability == TargetApplicability.Applicable && x.State is not (OptimizationTargetState.Default or OptimizationTargetState.Unoptimized)).Take(4).Select(x => $"{x.Target}: 验证状态 {x.State}");
+            var detail = status == RestoreItemStatus.Restored
+                ? "已恢复并通过实时验证。"
+                : string.Join("；", failed.Take(4).Select(x => $"{x.Target}: {x.Message}").Concat(verificationDelta).DefaultIfEmpty("执行后仍未达到安全默认基线，请查看逐项目标状态。"));
             results.Add(new RestoreItemResult(item.Id, item.Title, status, detail));
         }
         var reportPath = Path.Combine(AppPaths.ReportRoot, $"default-restore-{DateTime.Now:yyyyMMdd-HHmmss}.json");
         Directory.CreateDirectory(AppPaths.ReportRoot);
         AtomicFile.Write(reportPath, JsonSerializer.Serialize(new { schemaVersion = 2, completedAt = DateTimeOffset.Now, results }, JsonOptions));
+        var mutable = ReadMutableState();
+        foreach (var result in results.Where(x => x.Status is RestoreItemStatus.Restored or RestoreItemStatus.AlreadyDefault))
+        {
+            mutable.Applied.Remove(result.Id);
+            mutable.SkipDecisions.RemoveAll(x => x.ItemId.Equals(result.Id, StringComparison.OrdinalIgnoreCase));
+        }
+        WriteState(mutable);
         LogService.Write($"安全默认恢复完成：{results.Count} 项，报告 {reportPath}");
         return new RestoreExecutionReport(results, DateTimeOffset.Now, reportPath);
     }
 
-    private static OptimizationStateInfo EvaluateLiveState(OptimizerItem item, HashSet<string> disabledTasks)
+    private static (SnapshotTargets Effective, List<OptimizationTargetInfo> Skipped) ApplySafetyProfile(OptimizerItem item, SnapshotTargets source)
+    {
+        if (item.Id is not ("PerformanceTweaks" or "DisableGameBarXbox" or "DisableTelemetryServices" or "DisableChromeTelemetry"))
+            return (source, new List<OptimizationTargetInfo>());
+
+        var effective = new SnapshotTargets();
+        var skipped = new List<OptimizationTargetInfo>();
+        bool AllowRegistry(RegistryDesired desired) => item.Id switch
+        {
+            "PerformanceTweaks" => desired.Name.Equals("EnableTransparency", StringComparison.OrdinalIgnoreCase),
+            "DisableGameBarXbox" => true,
+            "DisableChromeTelemetry" => true,
+            "DisableTelemetryServices" => new[] { "PublishUserActivities", "CEIPEnable", "AITEnable", "DisableInventory", "DisableUAR", "Start", "AllowExperimentation" }.Contains(desired.Name, StringComparer.OrdinalIgnoreCase)
+                && (!desired.Name.Equals("Start", StringComparison.OrdinalIgnoreCase) || desired.Path.Contains("SQMLogger", StringComparison.OrdinalIgnoreCase)),
+            _ => false
+        };
+        bool AllowService(ServiceDesired desired) => item.Id == "DisableTelemetryServices"
+            && desired.Name is "DiagTrack" or "dmwappushservice";
+        bool AllowCommand(string command)
+        {
+            if (item.Id != "DisableTelemetryServices" || !TryTaskName(command, out var task)) return false;
+            var name = NormalizeTask(task);
+            return name.Contains("\\Customer Experience Improvement Program\\", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("\\Microsoft\\Windows\\PI\\Sqm-Tasks", StringComparison.OrdinalIgnoreCase)
+                || name.Contains("\\Microsoft\\Windows\\Feedback\\Siuf\\", StringComparison.OrdinalIgnoreCase);
+        }
+
+        foreach (var desired in source.RegistryDesired)
+        {
+            if (AllowRegistry(desired))
+            {
+                effective.RegistryDesired.Add(desired);
+                effective.Registry.Add(new RegistryTarget(desired.Hive, desired.Path, desired.Name));
+            }
+            else
+            {
+                var target = $"{desired.Hive}\\{desired.Path}\\{desired.Name}";
+                skipped.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Skipped,
+                    RegistryEffectCatalog.Describe(desired) + "\n跳过原因：旧版动作不属于当前安全契约，禁止强制执行。",
+                    $"registry:{target}", TargetApplicability.Unsafe, TargetOutcome.Skipped, ExecutionDisposition.BlockedUnsafe, "旧版高风险或越界动作"));
+            }
+        }
+        foreach (var desired in source.ServiceDesired)
+        {
+            if (AllowService(desired))
+            {
+                effective.ServiceDesired.Add(desired);
+                effective.Services.Add(desired.Name);
+            }
+            else
+                skipped.Add(new OptimizationTargetInfo("服务", desired.Name, OptimizationTargetState.Skipped,
+                    SystemTargetEffectCatalog.DescribeService(desired.Name, desired.Mode) + "\n跳过原因：为避免影响搜索、兼容、错误诊断、Xbox 登录、云存档或手柄功能，当前安全契约不执行此动作。",
+                    $"service:{desired.Name}", TargetApplicability.Unsafe, TargetOutcome.Skipped, ExecutionDisposition.BlockedUnsafe, "安全契约禁止"));
+        }
+        var seenCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var command in source.Commands)
+        {
+            if (TryTaskName(command, out var task))
+            {
+                var key = "task:" + NormalizeTask(task);
+                if (!seenCommands.Add(key)) continue;
+            }
+            if (AllowCommand(command)) effective.Commands.Add(command);
+            else
+            {
+                var target = TryTaskName(command, out var taskName) ? NormalizeTask(taskName) : command;
+                skipped.Add(new OptimizationTargetInfo(TryTaskName(command, out _) ? "计划任务" : "系统命令", target, OptimizationTargetState.Skipped,
+                    SystemTargetEffectCatalog.DescribeCommand(command) + "\n跳过原因：旧版动作越出当前优化目的或没有足够安全的恢复保证。",
+                    $"command:{StableTargetDigest(target)}", TargetApplicability.Unsafe, TargetOutcome.Skipped, ExecutionDisposition.BlockedUnsafe, "旧版高风险或无可靠逆操作"));
+            }
+        }
+        foreach (var unsupported in source.UnsupportedActions)
+            skipped.Add(new OptimizationTargetInfo("进程控制", unsupported, OptimizationTargetState.Skipped,
+                "功能作用：阻止指定进程启动。\n优化后效果：旧版 YAML 会设置进程拒绝规则。\n潜在影响：进程阻止缺少可靠、可验证的跨版本恢复方式，因此安全执行器不会执行。\n跳过原因：没有明确逆操作。",
+                $"unsupported:{StableTargetDigest(unsupported)}", TargetApplicability.Unsafe, TargetOutcome.Skipped, ExecutionDisposition.BlockedUnsafe, "未知或无可靠逆操作"));
+        effective.Registry = effective.Registry.DistinctBy(x => $"{x.Hive}\\{x.Path}\\{x.Name}", StringComparer.OrdinalIgnoreCase).ToList();
+        effective.RegistryDesired = effective.RegistryDesired.DistinctBy(x => $"{x.Hive}\\{x.Path}\\{x.Name}", StringComparer.OrdinalIgnoreCase).ToList();
+        effective.Services = effective.Services.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        effective.ServiceDesired = effective.ServiceDesired.GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase).Select(x => x.Last()).ToList();
+        effective.Commands = effective.Commands.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return (effective, skipped);
+    }
+
+    private static OptimizationStateInfo EvaluateLiveState(OptimizerItem item, ScheduledTaskInventory taskInventory, bool hasExactSnapshot)
     {
         if (!SupportsCurrentWindows(item.Windows)) return new OptimizationStateInfo(item.Id, OptimizationLiveState.Unsupported, "当前 Windows 版本不适用。", 0, 0);
         var yaml = Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile);
         if (!File.Exists(yaml)) return new OptimizationStateInfo(item.Id, OptimizationLiveState.Unknown, "优化契约尚未下载，无法安全判断。", 0, 0);
-        var targets = ExtractSnapshotTargets(yaml);
-        var details = new List<OptimizationTargetInfo>();
+        var extracted = ExtractSnapshotTargets(yaml);
+        var profiled = ApplySafetyProfile(item, extracted);
+        var targets = profiled.Effective;
+        var details = new List<OptimizationTargetInfo>(profiled.Skipped);
         foreach (var desired in targets.RegistryDesired)
         {
             var target = $"{desired.Hive}\\{desired.Path}\\{desired.Name}";
@@ -765,24 +921,56 @@ public sealed class OptimizerService
         }
         foreach (var desired in targets.ServiceDesired)
         {
-            if (desired.Mode is "enable" or "start") continue;
             try
             {
                 using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{desired.Name}", false);
-                if (key == null) { details.Add(new OptimizationTargetInfo("服务", desired.Name, OptimizationTargetState.Unavailable, "当前系统未安装该服务。")); continue; }
+                var effect = SystemTargetEffectCatalog.DescribeService(desired.Name, desired.Mode);
+                if (key == null)
+                {
+                    details.Add(new OptimizationTargetInfo("服务", desired.Name, OptimizationTargetState.Unavailable,
+                        effect + "\n当前状态：当前 Windows 未安装该服务，可作为不适用项跳过。",
+                        $"service:{desired.Name}", TargetApplicability.OptionalMissing, TargetOutcome.Skipped, ExecutionDisposition.OptionalWhenAbsent, "服务未安装"));
+                    continue;
+                }
                 var start = Convert.ToInt32(key.GetValue("Start", -1));
-                var optimizedStart = desired.Mode == "disable" ? 4 : 3;
-                var state = start == optimizedStart ? OptimizationTargetState.Optimized : start == DefaultServiceStart(desired.Name) ? OptimizationTargetState.Default : OptimizationTargetState.Diverged;
-                details.Add(new OptimizationTargetInfo("服务", desired.Name, state, $"当前启动类型值：{start}。"));
+                var runtimeQuery = RunSystemCommand("sc.exe", $"query \"{desired.Name}\"");
+                var runtimeMatch = Regex.Match(runtimeQuery.Output, @"(?im)(?:STATE|状态)\s*:\s*(\d+)");
+                if (!runtimeQuery.Ok || !runtimeMatch.Success)
+                {
+                    details.Add(new OptimizationTargetInfo("服务", desired.Name, OptimizationTargetState.Unknown,
+                        effect + "\n当前状态：已读取启动类型，但运行状态查询失败，" + runtimeQuery.Output,
+                        $"service:{desired.Name}", TargetApplicability.QueryFailed, TargetOutcome.Unknown));
+                    continue;
+                }
+                var running = runtimeMatch.Groups[1].Value == "4";
+                var serviceOptimized = desired.Mode switch
+                {
+                    "disable" => start == 4 && !running,
+                    "demand" => start == 3,
+                    "enable" => start is 2 or 3,
+                    "start" => start is 2 or 3 && running,
+                    _ => false
+                };
+                var state = serviceOptimized ? OptimizationTargetState.Optimized : start == DefaultServiceStart(desired.Name) ? OptimizationTargetState.Default : OptimizationTargetState.Diverged;
+                details.Add(new OptimizationTargetInfo("服务", desired.Name, state,
+                    effect + $"\n当前状态：启动类型值为 {start}（2 自动、3 手动、4 禁用），服务当前{(running ? "正在运行" : "未运行")}。",
+                    $"service:{desired.Name}", TargetApplicability.Applicable, serviceOptimized ? TargetOutcome.Optimized : TargetOutcome.NotOptimized));
             }
-            catch (Exception ex) { details.Add(new OptimizationTargetInfo("服务", desired.Name, OptimizationTargetState.Unknown, ex.Message)); }
+            catch (Exception ex)
+            {
+                details.Add(new OptimizationTargetInfo("服务", desired.Name, OptimizationTargetState.Unknown,
+                    SystemTargetEffectCatalog.DescribeService(desired.Name, desired.Mode) + "\n当前状态：读取失败，" + ex.Message,
+                    $"service:{desired.Name}", TargetApplicability.QueryFailed, TargetOutcome.Unknown));
+            }
         }
+        var seenTasks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var command in targets.Commands)
         {
             if (TryTaskName(command, out var task))
             {
-                var disabled = disabledTasks.Contains(NormalizeTask(task));
-                details.Add(new OptimizationTargetInfo("计划任务", task, disabled ? OptimizationTargetState.Optimized : OptimizationTargetState.Default, disabled ? "计划任务已禁用。" : "计划任务处于启用状态。"));
+                var normalized = NormalizeTask(task);
+                if (!seenTasks.Add(normalized)) continue;
+                details.Add(AssessScheduledTask(task, taskInventory));
             }
             else if (command.Contains("fsutil", StringComparison.OrdinalIgnoreCase) && command.Contains("disablelastaccess", StringComparison.OrdinalIgnoreCase))
             {
@@ -790,32 +978,49 @@ public sealed class OptimizerService
                 var match = Regex.Match(query.Output, @"=\s*(\d+)");
                 var value = match.Success ? match.Groups[1].Value : "未知";
                 var state = !query.Ok || !match.Success ? OptimizationTargetState.Unknown : value == "1" ? OptimizationTargetState.Optimized : value is "2" or "3" ? OptimizationTargetState.Default : OptimizationTargetState.Diverged;
-                details.Add(new OptimizationTargetInfo("系统命令", "fsutil disablelastaccess", state, $"当前查询值：{value}。"));
+                details.Add(new OptimizationTargetInfo("系统命令", "fsutil disablelastaccess", state,
+                    SystemTargetEffectCatalog.DescribeCommand("fsutil disablelastaccess") + $"\n当前状态：查询值为 {value}。",
+                    "command:fsutil-disablelastaccess", !query.Ok ? TargetApplicability.QueryFailed : TargetApplicability.Applicable,
+                    state == OptimizationTargetState.Optimized ? TargetOutcome.Optimized : state == OptimizationTargetState.Unknown ? TargetOutcome.Unknown : TargetOutcome.NotOptimized));
             }
             else if (command.Contains("icacls", StringComparison.OrdinalIgnoreCase) && TryQuotedPath(command, out var path))
             {
                 var acl = RunSystemCommand("icacls.exe", $"\"{Environment.ExpandEnvironmentVariables(path)}\"");
                 var denied = acl.Output.Contains("SYSTEM:(DENY)", StringComparison.OrdinalIgnoreCase);
                 var state = !acl.Ok ? OptimizationTargetState.Unknown : denied ? OptimizationTargetState.Optimized : OptimizationTargetState.Default;
-                details.Add(new OptimizationTargetInfo("ACL", path, state, !acl.Ok ? "无法读取当前访问控制列表。" : denied ? "检测到 SYSTEM 拒绝规则。" : "未检测到工具设置的拒绝规则。"));
+                details.Add(new OptimizationTargetInfo("ACL", path, state,
+                    SystemTargetEffectCatalog.DescribeAcl(path) + "\n当前状态：" + (!acl.Ok ? "无法读取当前访问控制列表。" : denied ? "检测到 SYSTEM 拒绝规则。" : "未检测到工具设置的拒绝规则。"),
+                    $"acl:{path}", !acl.Ok ? TargetApplicability.QueryFailed : TargetApplicability.Applicable,
+                    state == OptimizationTargetState.Optimized ? TargetOutcome.Optimized : state == OptimizationTargetState.Unknown ? TargetOutcome.Unknown : TargetOutcome.NotOptimized));
             }
-            else details.Add(new OptimizationTargetInfo("命令", command, OptimizationTargetState.Unknown, "没有声明可验证的状态读取器。"));
+            else details.Add(new OptimizationTargetInfo("命令", command, OptimizationTargetState.Unknown,
+                SystemTargetEffectCatalog.DescribeCommand(command) + "\n当前状态：没有声明可验证的状态读取器，已阻止执行。",
+                $"command:{StableTargetDigest(command)}", TargetApplicability.QueryFailed, TargetOutcome.Unknown, ExecutionDisposition.Unsupported));
         }
-        var total = details.Count;
-        var optimized = details.Count(x => x.State == OptimizationTargetState.Optimized);
-        var defaults = details.Count(x => x.State is OptimizationTargetState.Default or OptimizationTargetState.Unoptimized);
+        if (item.Id.Equals("DisableFirefoxTelemetry", StringComparison.OrdinalIgnoreCase) && taskInventory.Ok)
+        {
+            foreach (var dynamicTask in taskInventory.Tasks.Values.Where(x => x.Name.Contains("Firefox Default Browser Agent", StringComparison.OrdinalIgnoreCase)))
+                if (seenTasks.Add(NormalizeTask(dynamicTask.Name))) details.Add(AssessScheduledTask(dynamicTask.Name, taskInventory));
+        }
+        var applicable = details.Where(x => x.Applicability == TargetApplicability.Applicable).ToList();
+        var skipped = details.Count(x => x.Applicability is TargetApplicability.NotApplicable or TargetApplicability.OptionalMissing or TargetApplicability.Unsafe or TargetApplicability.UnsupportedBuild || x.State == OptimizationTargetState.Skipped);
+        var total = applicable.Count;
+        var optimized = applicable.Count(x => x.State == OptimizationTargetState.Optimized);
+        var defaults = applicable.Count(x => x.State is OptimizationTargetState.Default or OptimizationTargetState.Unoptimized);
         var unresolved = total - optimized - defaults;
-        if (total == 0) return new OptimizationStateInfo(item.Id, OptimizationLiveState.Unknown, "没有可验证目标。", 0, 0, details);
+        if (total == 0 && skipped == 0) return new OptimizationStateInfo(item.Id, OptimizationLiveState.Unknown, "没有可验证目标。", 0, 0, details);
         var aggregate = AggregateTargetStates(details.Select(x => x.State));
         var detail = aggregate switch
         {
             OptimizationLiveState.ExternallyManaged => "部分目标由外部策略管理。",
             OptimizationLiveState.Optimized => "所有目标均处于优化状态。",
-            OptimizationLiveState.Mixed => $"{optimized}/{total} 已优化，{defaults} 项未优化，{unresolved} 项无法确认。",
+            OptimizationLiveState.OptimizedWithSkips => $"{optimized}/{total} 个适用目标已优化，跳过 {skipped} 项不适用或安全阻止目标。",
+            OptimizationLiveState.Mixed => $"{optimized}/{total} 个适用目标已优化，{defaults} 项未优化，{unresolved} 项无法确认，另跳过 {skipped} 项。",
             OptimizationLiveState.Default => "当前没有目标处于优化值；软件或用户已有设置将保持不变。",
-            _ => $"0/{total} 已优化，{defaults} 项未优化，{unresolved} 项无法确认。"
+            _ => $"{optimized}/{total} 个适用目标已优化，{defaults} 项未优化，{unresolved} 项无法确认，另跳过 {skipped} 项。"
         };
-        return new OptimizationStateInfo(item.Id, aggregate, detail, optimized, total, details);
+        var rollback = hasExactSnapshot ? RollbackCapability.ExactSnapshot : RollbackCapability.SafeBaseline;
+        return new OptimizationStateInfo(item.Id, aggregate, detail, optimized, total, details, skipped, rollback);
     }
 
     private static OptimizationLiveState AggregateTargetStates(IEnumerable<OptimizationTargetState> source)
@@ -823,15 +1028,21 @@ public sealed class OptimizerService
         var states = source.ToList();
         if (states.Count == 0) return OptimizationLiveState.Unknown;
         if (states.Any(x => x == OptimizationTargetState.ExternallyManaged)) return OptimizationLiveState.ExternallyManaged;
-        var optimized = states.Count(x => x == OptimizationTargetState.Optimized);
-        if (optimized == states.Count) return OptimizationLiveState.Optimized;
+        var applicable = states.Where(x => x is not (OptimizationTargetState.Unavailable or OptimizationTargetState.Skipped)).ToList();
+        var skipped = states.Count - applicable.Count;
+        if (applicable.Any(x => x is OptimizationTargetState.Unknown or OptimizationTargetState.Diverged))
+            return applicable.Any(x => x == OptimizationTargetState.Optimized) ? OptimizationLiveState.Mixed : OptimizationLiveState.NeedsReview;
+        var optimized = applicable.Count(x => x == OptimizationTargetState.Optimized);
+        if (applicable.Count == 0 && skipped > 0) return OptimizationLiveState.OptimizedWithSkips;
+        if (optimized == applicable.Count) return skipped > 0 ? OptimizationLiveState.OptimizedWithSkips : OptimizationLiveState.Optimized;
         if (optimized > 0) return OptimizationLiveState.Mixed;
-        return states.All(x => x is OptimizationTargetState.Default or OptimizationTargetState.Unoptimized) ? OptimizationLiveState.Default : OptimizationLiveState.Unknown;
+        return applicable.All(x => x is OptimizationTargetState.Default or OptimizationTargetState.Unoptimized) ? OptimizationLiveState.Default : OptimizationLiveState.Unknown;
     }
 
     private static List<RestoreResult> RestoreBaseline(OptimizerItem item)
     {
-        var targets = ExtractSnapshotTargets(Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile));
+        var extracted = ExtractSnapshotTargets(Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile));
+        var targets = ApplySafetyProfile(item, extracted).Effective;
         var results = new List<RestoreResult>();
         foreach (var desired in targets.RegistryDesired)
         {
@@ -986,35 +1197,78 @@ public sealed class OptimizerService
     private static readonly Dictionary<string, int> ServiceDefaultStarts = new(StringComparer.OrdinalIgnoreCase)
     {
         ["SysMain"] = 2, ["DiagTrack"] = 2, ["diagsvc"] = 3, ["dmwappushservice"] = 3,
-        ["WSearch"] = 2, ["WerSvc"] = 3, ["PcaSvc"] = 3, ["Spooler"] = 2,
+        ["WSearch"] = 2, ["WerSvc"] = 3, ["PcaSvc"] = 2, ["Spooler"] = 2,
         ["wuauserv"] = 3, ["UsoSvc"] = 2, ["DoSvc"] = 2, ["BITS"] = 3,
         ["RemoteRegistry"] = 4, ["NvTelemetryContainer"] = 3
     };
 
     private static int DefaultServiceStart(string name) => ServiceDefaultStarts.TryGetValue(name, out var start) ? start : 3;
 
-    private static HashSet<string> QueryDisabledTasks()
+    private static ScheduledTaskInventory QueryScheduledTaskInventory()
     {
-        if (_disabledTaskCache != null && DateTimeOffset.Now - _disabledTaskCacheAt < TimeSpan.FromSeconds(30))
-            return new HashSet<string>(_disabledTaskCache, StringComparer.OrdinalIgnoreCase);
-        var script = "Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { -not $_.Settings.Enabled } | ForEach-Object { $_.TaskPath + $_.TaskName } | ConvertTo-Json -Compress";
+        if (_taskInventoryCache != null && DateTimeOffset.Now - _taskInventoryCacheAt < TimeSpan.FromSeconds(30))
+            return _taskInventoryCache;
+        const string script = "$ErrorActionPreference='Stop';@((Get-ScheduledTask -ErrorAction Stop) | ForEach-Object {[pscustomobject]@{Name=($_.TaskPath+$_.TaskName);Enabled=[bool]$_.Settings.Enabled;State=[string]$_.State}}) | ConvertTo-Json -Compress -Depth 3";
         var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
         var result = RunSystemCommand("powershell.exe", $"-NoProfile -EncodedCommand {encoded}", 20000);
-        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (!result.Ok || string.IsNullOrWhiteSpace(result.Output)) return set;
+        if (!result.Ok || string.IsNullOrWhiteSpace(result.Output))
+            return new ScheduledTaskInventory(false, new Dictionary<string, ScheduledTaskStatus>(StringComparer.OrdinalIgnoreCase), string.IsNullOrWhiteSpace(result.Output) ? "计划任务查询未返回数据。" : result.Output);
         try
         {
-            using var doc = JsonDocument.Parse(result.Output);
-            if (doc.RootElement.ValueKind == JsonValueKind.Array) foreach (var value in doc.RootElement.EnumerateArray()) set.Add(NormalizeTask(value.ToString()));
-            else if (doc.RootElement.ValueKind == JsonValueKind.String) set.Add(NormalizeTask(doc.RootElement.ToString()));
+            var output = result.Output.Trim();
+            var cliXml = output.IndexOf("#< CLIXML", StringComparison.OrdinalIgnoreCase);
+            if (cliXml >= 0) output = output[..cliXml].Trim();
+            var arrayStart = output.IndexOf('[');
+            var objectStart = output.IndexOf('{');
+            var start = arrayStart >= 0 && (objectStart < 0 || arrayStart < objectStart) ? arrayStart : objectStart;
+            var end = start >= 0 && output[start] == '[' ? output.LastIndexOf(']') : output.LastIndexOf('}');
+            if (start < 0 || end < start) throw new JsonException("未找到计划任务 JSON 载荷。");
+            using var doc = JsonDocument.Parse(output[start..(end + 1)]);
+            var tasks = new Dictionary<string, ScheduledTaskStatus>(StringComparer.OrdinalIgnoreCase);
+            var values = doc.RootElement.ValueKind == JsonValueKind.Array ? doc.RootElement.EnumerateArray().ToList() : new List<JsonElement> { doc.RootElement };
+            foreach (var value in values)
+            {
+                var name = NormalizeTask(value.S("Name"));
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                tasks[name] = new ScheduledTaskStatus(name, value.B("Enabled", true), value.S("State", "Unknown"));
+            }
+            _taskInventoryCache = new ScheduledTaskInventory(true, tasks, "");
+            _taskInventoryCacheAt = DateTimeOffset.Now;
+            return _taskInventoryCache;
         }
-        catch { }
-        _disabledTaskCache = new HashSet<string>(set, StringComparer.OrdinalIgnoreCase);
-        _disabledTaskCacheAt = DateTimeOffset.Now;
-        return set;
+        catch (Exception ex)
+        {
+            return new ScheduledTaskInventory(false, new Dictionary<string, ScheduledTaskStatus>(StringComparer.OrdinalIgnoreCase), "计划任务返回格式无效：" + ex.Message);
+        }
     }
 
-    private static string NormalizeTask(string task) => task.Replace("\\\\", "\\").Trim().Trim('"');
+    private static string NormalizeTask(string task)
+    {
+        var normalized = task.Replace('/', '\\').Replace("\\\\", "\\").Trim().Trim('"');
+        if (!normalized.StartsWith('\\')) normalized = "\\" + normalized;
+        return normalized;
+    }
+
+    private static OptimizationTargetInfo AssessScheduledTask(string task, ScheduledTaskInventory inventory)
+    {
+        var normalized = NormalizeTask(task);
+        var effect = SystemTargetEffectCatalog.DescribeTask(normalized);
+        if (!inventory.Ok)
+            return new OptimizationTargetInfo("计划任务", normalized, OptimizationTargetState.Unknown,
+                effect + "\n当前状态：查询失败，" + inventory.Error,
+                $"task:{normalized}", TargetApplicability.QueryFailed, TargetOutcome.Unknown);
+        if (!inventory.Tasks.TryGetValue(normalized, out var status))
+            return new OptimizationTargetInfo("计划任务", normalized, OptimizationTargetState.Unavailable,
+                effect + "\n当前状态：当前 Windows 或软件未安装该任务，可作为不适用项跳过。",
+                $"task:{normalized}", TargetApplicability.OptionalMissing, TargetOutcome.Skipped, ExecutionDisposition.OptionalWhenAbsent, "任务不存在");
+        var optimized = !status.Enabled;
+        return new OptimizationTargetInfo("计划任务", normalized, optimized ? OptimizationTargetState.Optimized : OptimizationTargetState.Default,
+            effect + $"\n当前状态：任务已{(status.Enabled ? "启用" : "禁用")}，运行状态 {status.State}。",
+            $"task:{normalized}", TargetApplicability.Applicable, optimized ? TargetOutcome.Optimized : TargetOutcome.NotOptimized);
+    }
+
+    private static string StableTargetDigest(string value)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..16];
 
     public async Task InstallAsync(CancellationToken token, Action<string>? status = null, bool force = false)
     {
@@ -1082,9 +1336,11 @@ public sealed class OptimizerService
                     }
                 }));
             }
+            if (!IsExeValid()) throw new InvalidOperationException("OptimizerNXT 主程序校验失败，已阻止使用。");
             foreach (var item in items)
-                if (!IsInstalled(item)) throw new InvalidOperationException($"{item.Title} 的优化契约或文件校验失败，已阻止使用。");
+                if (!IsItemFilesValid(item)) throw new InvalidOperationException($"{item.Title} 的优化契约或文件校验失败，已阻止使用。");
             File.WriteAllText(Path.Combine(AppPaths.OptimizerRuntime, "version.json"), JsonSerializer.Serialize(new { version = PinnedVersion, installedAt = DateTimeOffset.Now, sha256 = OptimizerHash }, JsonOptions), Encoding.UTF8);
+            _componentStatusCache = null;
             LogService.Write("OptimizerNXT 组件安装完成");
         }
         finally
@@ -1094,38 +1350,82 @@ public sealed class OptimizerService
         }
     }
 
-    public async Task<string> ApplyAsync(OptimizerItem item, CancellationToken token)
+    public async Task<string> ApplyAsync(OptimizerItem item, CancellationToken token, bool confirmSkips = false)
     {
         var status = await GetComponentStatusAsync();
         if (status.State != ComponentState.Online) throw new InvalidOperationException("OptimizerNXT 组件未就绪，无法执行系统优化。");
+        var before = (await GetLiveStatesAsync(new[] { item }, forceRefresh: true))[item.Id];
+        if (before.State is OptimizationLiveState.Optimized or OptimizationLiveState.OptimizedWithSkips)
+            return before.SkippedTargets > 0 ? $"适用目标已经优化，已跳过 {before.SkippedTargets} 个本机不适用或安全阻止目标。" : "该项目的实时目标已经处于优化状态，无需重复执行。";
+        if (before.State is OptimizationLiveState.Unknown or OptimizationLiveState.NeedsReview or OptimizationLiveState.ExternallyManaged or OptimizationLiveState.Unsupported)
+            throw new InvalidOperationException("当前存在查询失败、外部策略或不受支持目标，已阻止盲目执行。请刷新状态并查看逐项目标说明。");
+        if (before.SkippedTargets > 0 && !confirmSkips)
+            throw new InvalidOperationException($"该项目有 {before.SkippedTargets} 个本机不适用或安全阻止目标，需要先在详情面板确认跳过。" );
         BackupInputs();
         var state = ReadMutableState();
-        if (state.Applied.TryGetValue(item.Id, out var existing) && existing.AppliedAt != null)
-            return "该项目已处于优化开启状态，无需重复执行。";
-        if (!state.Applied.ContainsKey(item.Id))
-            state.Applied[item.Id] = new AppliedEntry(item.Id, item.Title, item.YamlFile, CaptureSnapshot(item), null);
+        var operationSnapshot = CaptureSnapshot(item);
+        var exactSnapshot = state.Applied.TryGetValue(item.Id, out var existing) && existing.Snapshot != null ? existing.Snapshot : operationSnapshot;
+        state.Applied[item.Id] = new AppliedEntry(item.Id, item.Title, item.YamlFile, exactSnapshot, null);
         var yaml = Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile);
         var sig = yaml + ".sig";
         if (!File.Exists(yaml) || (item.SigRequired && !File.Exists(sig))) throw new InvalidOperationException("YAML 或签名文件缺失，已阻止执行。");
-        StopStaleOptimizerProcesses();
-        var exe = Path.Combine(AppPaths.OptimizerRuntime, "optimizerNXT.exe");
-        var result = await RunProcessAsync(exe, $"apply \"{yaml}\"", AppPaths.OptimizerRuntime, token, TimeSpan.FromSeconds(180));
-        if (result.HadKnownInstanceError)
+        try
         {
-            StopStaleOptimizerProcesses();
-            await Task.Delay(800, token);
-            result = await RunProcessAsync(exe, $"apply \"{yaml}\"", AppPaths.OptimizerRuntime, token, TimeSpan.FromSeconds(180));
+            if (CanExecuteNatively(item))
+            {
+                var nativeResults = await Task.Run(() => ApplyNativePlan(item), token);
+                var failedNative = nativeResults.Where(x => !x.Ok).ToList();
+                if (failedNative.Count > 0)
+                    throw new InvalidOperationException("安全执行计划有目标失败：\n" + string.Join("\n", failedNative.Take(8).Select(x => $"{x.Target}：{x.Message}")));
+            }
+            else
+            {
+                StopStaleOptimizerProcesses();
+                var exe = Path.Combine(AppPaths.OptimizerRuntime, "optimizerNXT.exe");
+                var result = await RunProcessAsync(exe, $"apply \"{yaml}\"", AppPaths.OptimizerRuntime, token, TimeSpan.FromSeconds(180));
+                if (result.HadKnownInstanceError)
+                {
+                    StopStaleOptimizerProcesses();
+                    await Task.Delay(800, token);
+                    result = await RunProcessAsync(exe, $"apply \"{yaml}\"", AppPaths.OptimizerRuntime, token, TimeSpan.FromSeconds(180));
+                }
+                if (!result.Succeeded)
+                {
+                    if (result.TimedOut) throw new InvalidOperationException($"优化执行超过 180 秒仍未返回完成状态，已自动结束组件进程。\n\n{TrimFailureOutput(result.Output)}");
+                    throw new InvalidOperationException(TrimFailureOutput(result.Output));
+                }
+            }
+
+            InvalidateLiveStateCache();
+            var verified = (await GetLiveStatesAsync(new[] { item }, forceRefresh: true))[item.Id];
+            if (verified.State is not (OptimizationLiveState.Optimized or OptimizationLiveState.OptimizedWithSkips))
+            {
+                var differences = verified.TargetDetails.Where(x => x.Applicability == TargetApplicability.Applicable && x.State != OptimizationTargetState.Optimized).Take(8).Select(x => $"{x.Kind} {x.Target}：{x.State}");
+                throw new InvalidOperationException("执行程序已结束，但逐目标验证未通过：\n" + string.Join("\n", differences));
+            }
+            state.Applied[item.Id] = state.Applied[item.Id] with { AppliedAt = DateTimeOffset.Now };
+            if (verified.SkippedTargets > 0)
+            {
+                var contractHash = GetContracts().TryGetValue(item.Id, out var contract) ? contract.ContractSha256 : "";
+                state.SkipDecisions.RemoveAll(x => x.ItemId.Equals(item.Id, StringComparison.OrdinalIgnoreCase));
+                foreach (var target in verified.TargetDetails.Where(x => x.Applicability is TargetApplicability.NotApplicable or TargetApplicability.OptionalMissing or TargetApplicability.Unsafe or TargetApplicability.UnsupportedBuild))
+                    state.SkipDecisions.Add(new OptimizationSkipDecision(item.Id, target.TargetId, contractHash, Environment.OSVersion.Version.Build, StableTargetDigest(target.Target), string.IsNullOrWhiteSpace(target.SkipReason) ? "本机不适用或安全阻止" : target.SkipReason, DateTimeOffset.Now));
+            }
+            WriteState(state);
+            LogService.Write($"应用并验证优化：{item.Title}，适用 {verified.MatchedTargets}/{verified.TotalTargets}，跳过 {verified.SkippedTargets}");
+            return verified.SkippedTargets > 0 ? $"优化已验证完成，跳过 {verified.SkippedTargets} 个不适用或安全阻止目标。" : "优化已执行并通过逐目标验证，可再次点击该项目精确回退。";
         }
-        if (!result.Succeeded)
+        catch (Exception applyError)
         {
-            if (result.TimedOut) throw new InvalidOperationException($"优化执行超过 180 秒仍未返回完成状态，已自动结束组件进程。\n\n{TrimFailureOutput(result.Output)}");
-            throw new InvalidOperationException(TrimFailureOutput(result.Output));
+            var rollback = RestoreSnapshot(operationSnapshot);
+            InvalidateLiveStateCache();
+            if (existing != null) state.Applied[item.Id] = existing;
+            else state.Applied.Remove(item.Id);
+            WriteState(state);
+            var rollbackText = rollback.Ok ? "本次已修改目标已自动回退。" : "自动回退存在失败，请查看恢复报告并避免重复执行。";
+            LogService.Write($"应用验证失败：{item.Title} - {applyError.Message}；回退 {rollback.Ok}");
+            throw new InvalidOperationException(applyError.Message + "\n\n" + rollbackText, applyError);
         }
-        state.Applied[item.Id] = state.Applied[item.Id] with { AppliedAt = DateTimeOffset.Now };
-        WriteState(state);
-        InvalidateLiveStateCache();
-        LogService.Write($"应用优化：{item.Title}");
-        return "优化已执行，可再次点击该项目回退。";
     }
 
     public async Task<string> RestoreAsync(string id)
@@ -1143,6 +1443,7 @@ public sealed class OptimizerService
             throw new InvalidOperationException($"回退未完成，已保留该项目的开启状态，可稍后再次尝试。\n\n{failed}");
         }
         state.Applied.Remove(id);
+        state.SkipDecisions.RemoveAll(x => x.ItemId.Equals(id, StringComparison.OrdinalIgnoreCase));
         WriteState(state);
         await Task.Yield();
         LogService.Write($"回退优化：{entry.Title}，结果 {report.Ok}");
@@ -1171,7 +1472,7 @@ public sealed class OptimizerService
         return ids.Count == 0 ? "没有可恢复的优化快照。" : $"已恢复 {ids.Count} 个优化项，报告已保存。";
     }
 
-    private static int ReadyCount(List<OptimizerItem> items) => items.Count(IsInstalled);
+    private static int ReadyCount(List<OptimizerItem> items, bool exeValid) => exeValid ? items.Count(IsItemFilesValid) : 0;
 
     private static bool IsExeValid()
     {
@@ -1181,18 +1482,24 @@ public sealed class OptimizerService
 
     private static bool IsInstalled(OptimizerItem item)
     {
+        return IsExeValid() && IsItemFilesValid(item);
+    }
+
+    private static bool IsItemFilesValid(OptimizerItem item)
+    {
         var yaml = Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile);
         var sig = yaml + ".sig";
         var contracts = new OptimizerService().GetContracts();
         if (!contracts.TryGetValue(item.Id, out var contract)) return false;
-        return IsExeValid() && File.Exists(yaml)
+        return File.Exists(yaml)
             && DownloadService.Sha256(yaml).Equals(contract.YamlSha256, StringComparison.OrdinalIgnoreCase)
             && (!item.SigRequired || File.Exists(sig) && DownloadService.Sha256(sig).Equals(contract.SigSha256, StringComparison.OrdinalIgnoreCase));
     }
 
     private static Snapshot CaptureSnapshot(OptimizerItem item)
     {
-        var targets = ExtractSnapshotTargets(Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile));
+        var extracted = ExtractSnapshotTargets(Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile));
+        var targets = ApplySafetyProfile(item, extracted).Effective;
         var snapshot = new Snapshot { CapturedAt = DateTimeOffset.Now, Commands = targets.Commands };
         foreach (var reg in targets.Registry) snapshot.Registry.Add(CaptureRegistry(reg.Hive, reg.Path, reg.Name));
         foreach (var service in targets.Services) snapshot.Services.Add(CaptureService(service));
@@ -1203,7 +1510,83 @@ public sealed class OptimizerService
             else if (command.Contains("icacls", StringComparison.OrdinalIgnoreCase) && TryQuotedPath(command, out var aclPath)) snapshot.Acls.Add(CaptureAcl(aclPath));
             else snapshot.CommandStates.Add(CaptureCommand(command));
         }
+        snapshot.Tasks = snapshot.Tasks.DistinctBy(x => NormalizeTask(x.Name), StringComparer.OrdinalIgnoreCase).ToList();
         return snapshot;
+    }
+
+    private static bool CanExecuteNatively(OptimizerItem item)
+    {
+        var source = ExtractSnapshotTargets(Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile));
+        var effective = ApplySafetyProfile(item, source).Effective;
+        if (item.Id is "PerformanceTweaks" or "DisableGameBarXbox" or "DisableTelemetryServices" or "DisableChromeTelemetry") return true;
+        return source.UnsupportedActions.Count == 0
+            && effective.Files.Count == 0
+            && effective.Commands.All(command => TryTaskName(command, out _))
+            && effective.RegistryDesired.Count + effective.ServiceDesired.Count + effective.Commands.Count > 0;
+    }
+
+    private static List<RestoreResult> ApplyNativePlan(OptimizerItem item)
+    {
+        var source = ExtractSnapshotTargets(Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile));
+        var targets = ApplySafetyProfile(item, source).Effective;
+        var results = new List<RestoreResult>();
+        foreach (var desired in targets.RegistryDesired)
+        {
+            var target = $"{desired.Hive}\\{desired.Path}\\{desired.Name}";
+            try
+            {
+                using var key = OpenKey(desired.Hive, desired.Path, true) ?? CreateKey(desired.Hive, desired.Path) ?? throw new InvalidOperationException("无法创建注册表路径。");
+                if (desired.Delete) key.DeleteValue(desired.Name, false);
+                else key.SetValue(desired.Name, RegistryDesiredValue(desired), ParseKind(desired.Kind));
+                results.Add(new RestoreResult("registry", target, true, "已按安全契约写入。"));
+            }
+            catch (Exception ex) { results.Add(new RestoreResult("registry", target, false, ex.Message)); }
+        }
+        foreach (var desired in targets.ServiceDesired)
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{desired.Name}", true);
+                if (key == null)
+                {
+                    results.Add(new RestoreResult("service", desired.Name, true, "服务未安装，按不适用项跳过。"));
+                    continue;
+                }
+                var start = desired.Mode switch { "disable" => 4, "demand" => 3, "enable" or "start" => 3, _ => -1 };
+                if (start < 0) { results.Add(new RestoreResult("service", desired.Name, false, "未声明可执行的启动模式。")); continue; }
+                key.SetValue("Start", start, RegistryValueKind.DWord);
+                if (desired.Mode == "disable") RunSystemCommand("sc.exe", $"stop \"{desired.Name}\"");
+                else if (desired.Mode == "start") RunSystemCommand("sc.exe", $"start \"{desired.Name}\"");
+                results.Add(new RestoreResult("service", desired.Name, true, "已按安全契约设置启动类型。"));
+            }
+            catch (Exception ex) { results.Add(new RestoreResult("service", desired.Name, false, ex.Message)); }
+        }
+        var seenTasks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var command in targets.Commands)
+        {
+            if (!TryTaskName(command, out var task))
+            {
+                results.Add(new RestoreResult("command", command, false, "安全执行器不支持该命令。"));
+                continue;
+            }
+            task = NormalizeTask(task);
+            if (!seenTasks.Add(task)) continue;
+            var presence = QueryScheduledTaskPresence(task);
+            if (!presence.Ok) { results.Add(new RestoreResult("task", task, false, presence.Message)); continue; }
+            if (!presence.Exists) { results.Add(new RestoreResult("task", task, true, "任务未安装，按不适用项跳过。")); continue; }
+            RunSystemCommand("schtasks.exe", $"/end /tn \"{task}\"");
+            var disable = RunSystemCommand("schtasks.exe", $"/change /tn \"{task}\" /disable");
+            results.Add(new RestoreResult("task", task, disable.Ok, disable.Ok ? "任务已禁用。" : disable.Output));
+        }
+        return results;
+    }
+
+    private static object RegistryDesiredValue(RegistryDesired desired)
+    {
+        var value = desired.Value.Trim().Trim('"', '\'');
+        if (desired.Kind.Equals("DWord", StringComparison.OrdinalIgnoreCase) && long.TryParse(value, out var dword)) return unchecked((int)dword);
+        if (desired.Kind.Equals("QWord", StringComparison.OrdinalIgnoreCase) && long.TryParse(value, out var qword)) return qword;
+        return value;
     }
 
     private static SnapshotTargets ExtractSnapshotTargets(string yaml)
@@ -1213,12 +1596,13 @@ public sealed class OptimizerService
         string? hive = null, path = null, mode = null, serviceMode = null;
         var actionName = "";
         var inFiles = false;
+        var inProcessControl = false;
         foreach (var raw in File.ReadLines(yaml, Encoding.UTF8))
         {
             var line = Regex.Replace(raw, @"\s+#.*$", "").Trim();
             if (string.IsNullOrWhiteSpace(line)) continue;
             var action = Regex.Match(line, @"^-\s*name:\s*(.+)$", RegexOptions.IgnoreCase);
-            if (action.Success) actionName = CleanYamlScalar(action.Groups[1].Value);
+            if (action.Success) { actionName = CleanYamlScalar(action.Groups[1].Value); inProcessControl = false; }
             var top = Regex.Match(line, @"^([A-Za-z0-9_.-]+):\s*$");
             if (top.Success && !raw.StartsWith(' ') && !raw.StartsWith('\t'))
             {
@@ -1259,6 +1643,12 @@ public sealed class OptimizerService
                 }
             }
             if (Regex.IsMatch(line, @"^(files?|filesystem|deletefiles|removefiles|folders|directories):\s*$", RegexOptions.IgnoreCase)) { inFiles = true; continue; }
+            if (Regex.IsMatch(line, @"^processControl:\s*$", RegexOptions.IgnoreCase)) { inProcessControl = true; inFiles = false; continue; }
+            if (inProcessControl)
+            {
+                var deniedProcess = Regex.Match(line, @"^-\s*([A-Za-z0-9_.-]+\.exe)\s*$", RegexOptions.IgnoreCase);
+                if (deniedProcess.Success) targets.UnsupportedActions.Add($"processControl:deny:{deniedProcess.Groups[1].Value}");
+            }
             if (inFiles)
             {
                 var direct = Regex.Match(line, @"^-\s*(.+)$");
@@ -1276,6 +1666,7 @@ public sealed class OptimizerService
         targets.ServiceDesired = targets.ServiceDesired.GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase).Select(g => g.Last()).ToList();
         targets.Files = targets.Files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         targets.Commands = targets.Commands.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        targets.UnsupportedActions = targets.UnsupportedActions.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         return targets;
     }
 
@@ -1309,7 +1700,8 @@ public sealed class OptimizerService
     {
         using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{name}", false);
         var query = RunSystemCommand("sc.exe", $"query \"{name}\"");
-        return new ServiceSnapshot(name, key != null, key?.GetValue("Start")?.ToString(), key?.GetValue("DelayedAutoStart")?.ToString(), query.Ok && query.Output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase));
+        var state = Regex.Match(query.Output, @"(?im)(?:STATE|状态)\s*:\s*(\d+)");
+        return new ServiceSnapshot(name, key != null, key?.GetValue("Start")?.ToString(), key?.GetValue("DelayedAutoStart")?.ToString(), query.Ok && state.Success && state.Groups[1].Value == "4");
     }
 
     private static TaskSnapshot CaptureTask(string name)
@@ -1520,13 +1912,21 @@ public sealed class OptimizerService
             if (!string.IsNullOrWhiteSpace(expectedChecksum))
             {
                 state.Checksum = "";
-                var payload = JsonSerializer.Serialize(state, JsonOptions);
+                var payload = state.SchemaVersion < 3
+                    ? JsonSerializer.Serialize(new { state.SchemaVersion, Checksum = "", state.Applied }, JsonOptions)
+                    : JsonSerializer.Serialize(state, JsonOptions);
                 var actualChecksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
                 if (!actualChecksum.Equals(expectedChecksum, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("优化状态校验和不匹配");
                 state.Checksum = expectedChecksum;
             }
-            state.SchemaVersion = 2;
+            state.SchemaVersion = 3;
             state.Applied ??= new();
+            state.SkipDecisions ??= new();
+            var build = Environment.OSVersion.Version.Build;
+            var contracts = new OptimizerService().GetContracts();
+            state.SkipDecisions.RemoveAll(decision => decision.WindowsBuild != build
+                || !contracts.TryGetValue(decision.ItemId, out var contract)
+                || !contract.ContractSha256.Equals(decision.ContractSha256, StringComparison.OrdinalIgnoreCase));
             return state;
         }
         catch (Exception ex)
@@ -1541,7 +1941,7 @@ public sealed class OptimizerService
     private static void WriteState(OptimizerState state)
     {
         AppPaths.Ensure();
-        state.SchemaVersion = 2;
+        state.SchemaVersion = 3;
         state.Checksum = "";
         var payload = JsonSerializer.Serialize(state, JsonOptions);
         state.Checksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
@@ -1723,17 +2123,20 @@ public sealed class CleanerService
     private const string CleanerHash = "0322920A592BA311CB374B4F44053EE35F793C5A5690F1F8CB419B57321B2883";
     private int _installing;
     private string _installMessage = "";
+    private readonly object _itemsSync = new();
+    private List<CleanerItem>? _itemsCache;
+    private string _itemsFingerprint = "";
 
     public bool IsInstalling => _installing == 1;
 
     private static readonly List<CleanerItem> FallbackItems = new()
     {
-        new("system.tmp", "system", "tmp", "系统 · 临时文件", "清理 Windows 与应用产生的临时文件。", "Windows", "normal", true),
-        new("system.recycle_bin", "system", "recycle_bin", "系统 · 回收站", "清空回收站内容。", "Windows", "normal", true),
-        new("windows_explorer.thumbnails", "windows_explorer", "thumbnails", "资源管理器 · 缩略图缓存", "清理缩略图缓存。", "资源管理器", "normal", true),
-        new("microsoft_edge.cache", "microsoft_edge", "cache", "Edge · 缓存文件", "清理 Edge 网页缓存。", "浏览器", "normal", true),
-        new("google_chrome.cache", "google_chrome", "cache", "Chrome · 缓存文件", "清理 Chrome 网页缓存。", "浏览器", "normal", true),
-        new("firefox.cache", "firefox", "cache", "Firefox · 缓存文件", "清理 Firefox 网页缓存。", "浏览器", "normal", true)
+        new("system.tmp", "system", "tmp", "系统 · 临时文件", "清理 Windows 与应用产生的临时文件。", "Windows", "normal", true, CleanerSafetyTier.Recommended, true, "可重新生成的临时文件"),
+        new("system.recycle_bin", "system", "recycle_bin", "系统 · 回收站", "清空回收站内容。", "Windows", "high", false, CleanerSafetyTier.Sensitive, true, "可能包含用户仍需恢复的文件"),
+        new("windows_explorer.thumbnails", "windows_explorer", "thumbnails", "资源管理器 · 缩略图缓存", "清理缩略图缓存；执行时会重启资源管理器。", "Windows", "normal", true, CleanerSafetyTier.BalancedOnly, true, "均衡清理：可重新生成的缩略图", "会重启 Windows Explorer"),
+        new("microsoft_edge.cache", "microsoft_edge", "cache", "Edge · 缓存文件", "清理 Edge 网页缓存。", "浏览器", "normal", true, CleanerSafetyTier.Recommended, true, "可重新生成的网页缓存"),
+        new("google_chrome.cache", "google_chrome", "cache", "Chrome · 缓存文件", "清理 Chrome 网页缓存。", "浏览器", "normal", true, CleanerSafetyTier.Recommended, true, "可重新生成的网页缓存"),
+        new("firefox.cache", "firefox", "cache", "Firefox · 缓存文件", "清理 Firefox 网页缓存。", "浏览器", "normal", true, CleanerSafetyTier.Recommended, true, "可重新生成的网页缓存")
     };
 
     public async Task<ComponentStatus> GetStatusAsync()
@@ -1788,6 +2191,7 @@ public sealed class CleanerService
             if (!File.Exists(ExePath)) throw new InvalidOperationException("解压后未找到 bleachbit_console.exe");
             File.WriteAllText(Path.Combine(AppPaths.CleanerRuntime, "version.json"), JsonSerializer.Serialize(new { version = PinnedVersion, installedAt = DateTimeOffset.Now, downloadUrl = CleanerUrl }, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
             LogService.Write("BleachBit 组件安装完成");
+            lock (_itemsSync) { _itemsCache = null; _itemsFingerprint = ""; }
         }
         finally
         {
@@ -1798,11 +2202,23 @@ public sealed class CleanerService
 
     public async Task<List<CleanerItem>> GetItemsAsync()
     {
-        await Task.Yield();
         if (!IsInstalled()) return new List<CleanerItem>();
         var root = CleanerRoot();
         if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return FallbackItems;
+        var fingerprint = CleanerFingerprint(root);
+        lock (_itemsSync)
+            if (_itemsCache != null && _itemsFingerprint == fingerprint) return _itemsCache.ToList();
+        var parsed = await Task.Run(() => ParseCleanerItems(root));
+        lock (_itemsSync)
+        {
+            _itemsCache = parsed;
+            _itemsFingerprint = fingerprint;
+            return parsed.ToList();
+        }
+    }
 
+    private static List<CleanerItem> ParseCleanerItems(string root)
+    {
         var items = new List<CleanerItem>();
         foreach (var file in Directory.GetFiles(root, "*.xml", SearchOption.TopDirectoryOnly).OrderBy(x => x))
         {
@@ -1823,7 +2239,11 @@ public sealed class CleanerService
                     var id = $"{cleanerId}.{optionId}";
                     var optionLabel = TextOf(option.Element("label"), optionId);
                     var description = TextOf(option.Element("description"), cleanerDescription);
-                    var risk = CleanerRisk(cleanerId, optionId, optionLabel, description);
+                    var warning = TextOf(option.Element("warning"), "");
+                    var safety = CleanerSafety(id, warning);
+                    var applicable = IsCleanerApplicable(cleaner, option);
+                    var risk = CleanerRisk(cleanerId, optionId, optionLabel, description, warning, safety);
+                    var reason = CleanerSelectionReason(safety, applicable);
                     items.Add(new CleanerItem(
                         id,
                         cleanerId,
@@ -1832,7 +2252,11 @@ public sealed class CleanerService
                         CleanerDescription(cleanerLabel, optionId, optionLabel, description),
                         group,
                         risk,
-                        risk != "high" && DefaultCleanerOption(optionId, optionLabel)));
+                        applicable && safety is (CleanerSafetyTier.Recommended or CleanerSafetyTier.BalancedOnly),
+                        safety,
+                        applicable,
+                        reason,
+                        warning));
                 }
             }
             catch (Exception ex)
@@ -1840,8 +2264,15 @@ public sealed class CleanerService
                 LogService.Write($"清理项解析失败：{file} - {ex.Message}");
             }
         }
-
+        AddBuiltInSystemItems(items);
         return items.Count > 0 ? items : FallbackItems;
+    }
+
+    private static string CleanerFingerprint(string root)
+    {
+        var files = Directory.GetFiles(root, "*.xml", SearchOption.TopDirectoryOnly);
+        var latest = files.Length == 0 ? 0 : files.Max(x => File.GetLastWriteTimeUtc(x).Ticks);
+        return $"{PinnedVersion}|{files.Length}|{latest}";
     }
 
     public async Task<CleanerRunResult> RunAsync(string mode, IEnumerable<string> cleanerIds, CancellationToken token)
@@ -2051,16 +2482,113 @@ public sealed class CleanerService
         return "应用缓存";
     }
 
-    private static string CleanerRisk(string cleanerId, string optionId, string label, string description)
+    private static readonly HashSet<string> RecommendedCleanerIds = new(StringComparer.OrdinalIgnoreCase)
     {
-        var text = $"{cleanerId} {optionId} {label} {description}".ToLowerInvariant();
-        return text.Contains("password") || text.Contains("cookie") || text.Contains("history") || text.Contains("form") || text.Contains("session") || text.Contains("free_disk_space") || text.Contains("free disk") ? "high" : "normal";
+        "system.tmp", "adobe_reader.cache", "brave.cache", "chromium.cache", "claude.cache", "firefox.cache", "flash.cache",
+        "google_chrome.cache", "gpodder.cache", "hippo_opensim_viewer.cache", "librewolf.cache", "microsoft_edge.cache", "miro.cache",
+        "openoffice.cache", "palemoon.cache", "pidgin.cache", "safari.cache", "seamonkey.cache", "secondlife_viewer.Cache", "slack.cache",
+        "smartftp.cache", "thunderbird.cache", "vivaldi.cache", "vscode.cache", "vuze.cache", "waterfox.cache", "windows_media_player.cache",
+        "yahoo_messenger.cache", "zen.cache", "zoom.cache", "claude.tmp", "gimp.tmp", "silverlight.temp", "winrar.temp"
+    };
+
+    private static readonly HashSet<string> BalancedCleanerIds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "windows_explorer.thumbnails",
+        "brave.crash_reports", "chromium.crash_reports", "firefox.crash_reports", "google_chrome.crash_reports", "librewolf.crash_reports",
+        "microsoft_edge.crash_reports", "opera.crash_reports", "palemoon.crash_reports", "vivaldi.crash_reports", "waterfox.crash_reports", "zen.crash_reports",
+        "amule.logs", "claude.logs", "gpodder.logs", "hippo_opensim_viewer.logs", "miro.logs", "realplayer.logs", "screenlets.logs",
+        "smartftp.log", "vscode.logs", "vuze.logs", "warzone2100.logs", "zoom.logs"
+    };
+
+    private static CleanerSafetyTier CleanerSafety(string id, string warning)
+    {
+        if (RecommendedCleanerIds.Contains(id)) return string.IsNullOrWhiteSpace(warning) ? CleanerSafetyTier.Recommended : CleanerSafetyTier.ReviewRequired;
+        if (BalancedCleanerIds.Contains(id))
+            return string.IsNullOrWhiteSpace(warning) || id.Equals("windows_explorer.thumbnails", StringComparison.OrdinalIgnoreCase)
+                ? CleanerSafetyTier.BalancedOnly : CleanerSafetyTier.ReviewRequired;
+        var lower = id.ToLowerInvariant();
+        if (lower.Contains("password") || lower.Contains("cookie") || lower.Contains("session") || lower.Contains("site_data") || lower.Contains("site_preferences")
+            || lower.Contains("form") || lower.Contains("history") || lower.Contains("mru") || lower.Contains("recent") || lower.Contains("backup")
+            || lower.Contains("recovery") || lower.Contains("download") || lower.Contains("chat_log") || lower.Contains("memory_dump") || lower.Contains("recycle")
+            || lower.Contains("free_disk") || lower.Contains("prefetch") || lower.Contains("windows_defender") || lower.Contains("deepscan"))
+            return CleanerSafetyTier.Sensitive;
+        return string.IsNullOrWhiteSpace(warning) ? CleanerSafetyTier.ReviewRequired : CleanerSafetyTier.Sensitive;
     }
 
-    private static bool DefaultCleanerOption(string optionId, string label)
+    private static string CleanerRisk(string cleanerId, string optionId, string label, string description, string warning, CleanerSafetyTier safety)
     {
-        var text = $"{optionId} {label}".ToLowerInvariant();
-        return text.Contains("cache") || text.Contains("tmp") || text.Contains("temp") || text.Contains("thumbnail") || text.Contains("log") || text.Contains("backup") || text.Contains("recycle");
+        var text = $"{cleanerId} {optionId} {label} {description} {warning}".ToLowerInvariant();
+        return safety is CleanerSafetyTier.Sensitive or CleanerSafetyTier.Unsupported
+            || text.Contains("password") || text.Contains("cookie") || text.Contains("history") || text.Contains("form") || text.Contains("session") || text.Contains("free disk") ? "high" : "normal";
+    }
+
+    private static string CleanerSelectionReason(CleanerSafetyTier safety, bool applicable) => !applicable
+        ? "本机未检测到对应应用或 Windows 路径"
+        : safety switch
+        {
+            CleanerSafetyTier.Recommended => "可重新生成的缓存或严格临时文件",
+            CleanerSafetyTier.BalancedOnly => "均衡清理：缩略图、普通日志或应用崩溃报告",
+            CleanerSafetyTier.Sensitive => "包含用户数据、诊断价值或不可逆清理风险",
+            CleanerSafetyTier.Unsupported => "当前 Windows 不支持",
+            _ => "尚未进入审核白名单，默认不选择"
+        };
+
+    private static bool IsCleanerApplicable(XElement cleaner, XElement option)
+    {
+        var variables = cleaner.Elements("var").ToDictionary(
+            x => x.Attribute("name")?.Value ?? "",
+            x => x.Elements("value").Where(v => v.Attribute("os")?.Value is null or "windows").Select(v => v.Value.Trim()).Where(v => !string.IsNullOrWhiteSpace(v)).ToList(),
+            StringComparer.OrdinalIgnoreCase);
+        var windowsActions = option.Elements("action").Where(x => x.Attribute("os")?.Value is null or "windows").ToList();
+        if (windowsActions.Count == 0) return false;
+        foreach (var action in windowsActions)
+        {
+            var path = action.Attribute("path")?.Value;
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            var candidates = new List<string> { path };
+            foreach (var variable in variables.Where(x => path.Contains($"$${x.Key}$$", StringComparison.OrdinalIgnoreCase)))
+                candidates = candidates.SelectMany(candidate => variable.Value.Select(value => candidate.Replace($"$${variable.Key}$$", value, StringComparison.OrdinalIgnoreCase))).ToList();
+            foreach (var candidate in candidates)
+                if (CleanerPathRootExists(candidate)) return true;
+        }
+        return cleaner.Attribute("id")?.Value is "system" or "windows_explorer";
+    }
+
+    private static bool CleanerPathRootExists(string path)
+    {
+        var expanded = Environment.ExpandEnvironmentVariables(path.Replace("~/", Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + Path.DirectorySeparatorChar));
+        var wildcard = expanded.IndexOfAny(['*', '?']);
+        if (wildcard >= 0) expanded = expanded[..wildcard];
+        expanded = expanded.TrimEnd('\\', '/');
+        if (File.Exists(expanded) || Directory.Exists(expanded)) return true;
+        var parent = Path.GetDirectoryName(expanded);
+        return !string.IsNullOrWhiteSpace(parent) && Directory.Exists(parent);
+    }
+
+    private static void AddBuiltInSystemItems(List<CleanerItem> items)
+    {
+        var builtIns = new[]
+        {
+            ("clipboard", "剪贴板", CleanerSafetyTier.Sensitive, "可能清除仍需粘贴的内容"),
+            ("custom", "自定义清理", CleanerSafetyTier.ReviewRequired, "取决于用户自定义配置"),
+            ("dns_cache", "DNS 缓存", CleanerSafetyTier.ReviewRequired, "会暂时增加域名重新解析"),
+            ("empty_space", "擦除空闲空间", CleanerSafetyTier.Sensitive, "耗时长且增加磁盘写入"),
+            ("logs", "系统日志", CleanerSafetyTier.Sensitive, "会影响故障诊断"),
+            ("memory_dump", "系统内存转储", CleanerSafetyTier.Sensitive, "会影响蓝屏和崩溃分析"),
+            ("muicache", "程序显示名称缓存", CleanerSafetyTier.ReviewRequired, "删除后系统会重建"),
+            ("prefetch", "预读取缓存", CleanerSafetyTier.Sensitive, "可能降低近期启动速度"),
+            ("recycle_bin", "回收站", CleanerSafetyTier.Sensitive, "可能包含仍需恢复的文件"),
+            ("tmp", "临时文件", CleanerSafetyTier.Recommended, "可重新生成的系统临时文件"),
+            ("updates", "更新卸载文件", CleanerSafetyTier.Sensitive, "可能失去更新回退能力")
+        };
+        foreach (var entry in builtIns)
+        {
+            var id = "system." + entry.Item1;
+            if (items.Any(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase))) continue;
+            var selected = entry.Item3 == CleanerSafetyTier.Recommended;
+            items.Add(new CleanerItem(id, "system", entry.Item1, $"系统 · {entry.Item2}", $"BleachBit 内置系统清理项。{entry.Item4}。", "Windows",
+                entry.Item3 == CleanerSafetyTier.Sensitive ? "high" : "normal", selected, entry.Item3, true, entry.Item4));
+        }
     }
 
     private static string CultureName(string id)
@@ -2494,6 +3022,8 @@ public sealed record ProcessResult(int ExitCode, string Output, bool Succeeded, 
 public sealed record RegistryTarget(string Hive, string Path, string Name);
 public sealed record RegistryDesired(string Hive, string Path, string Name, string Kind, string Value, bool Delete, string ActionName = "");
 public sealed record ServiceDesired(string Name, string Mode);
+public sealed record ScheduledTaskStatus(string Name, bool Enabled, string State);
+public sealed record ScheduledTaskInventory(bool Ok, Dictionary<string, ScheduledTaskStatus> Tasks, string Error);
 public sealed class SnapshotTargets
 {
     public List<RegistryTarget> Registry { get; set; } = new();
@@ -2502,6 +3032,7 @@ public sealed class SnapshotTargets
     public List<string> Commands { get; set; } = new();
     public List<RegistryDesired> RegistryDesired { get; set; } = new();
     public List<ServiceDesired> ServiceDesired { get; set; } = new();
+    public List<string> UnsupportedActions { get; set; } = new();
 }
 public sealed record RegistrySnapshot(string Hive, string Path, string Name, bool KeyExists, bool ValueExists, string Kind, string? StringValue, string[]? StringArray, byte[]? BinaryValue, long? IntegerValue);
 public sealed record ServiceSnapshot(string Name, bool Exists, string? StartValue, string? DelayedAutoStart, bool WasRunning);
@@ -2525,7 +3056,8 @@ public sealed class Snapshot
 public sealed record AppliedEntry(string Id, string Title, string YamlFile, Snapshot? Snapshot, DateTimeOffset? AppliedAt);
 public sealed class OptimizerState
 {
-    public int SchemaVersion { get; set; } = 2;
+    public int SchemaVersion { get; set; } = 3;
     public string Checksum { get; set; } = "";
     public Dictionary<string, AppliedEntry> Applied { get; set; } = new();
+    public List<OptimizationSkipDecision> SkipDecisions { get; set; } = new();
 }

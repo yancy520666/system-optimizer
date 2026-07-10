@@ -28,12 +28,10 @@ public static class MotionService
 
     public static void AttachCardMotion(FrameworkElement element)
     {
-        var translate = new TranslateTransform();
-        element.RenderTransform = translate;
-        element.MouseEnter += (_, _) => AnimateTranslate(translate, ReducedMotion ? 0 : -1, 130);
-        element.MouseLeave += (_, _) => AnimateTranslate(translate, 0, 130);
-        element.MouseLeftButtonDown += (_, _) => AnimateTranslate(translate, 0, 80);
-        element.MouseLeftButtonUp += (_, _) => AnimateTranslate(translate, element.IsMouseOver && !ReducedMotion ? -1 : 0, 100);
+        element.MouseEnter += (_, _) => AnimateOpacity(element, ReducedMotion ? 1 : 0.985, 120);
+        element.MouseLeave += (_, _) => AnimateOpacity(element, 1, 120);
+        element.MouseLeftButtonDown += (_, _) => AnimateOpacity(element, ReducedMotion ? 1 : 0.96, 70);
+        element.MouseLeftButtonUp += (_, _) => AnimateOpacity(element, element.IsMouseOver && !ReducedMotion ? 0.985 : 1, 90);
     }
 
     public static void OpenDrawer(FrameworkElement overlay, TranslateTransform panelTransform)
@@ -72,12 +70,12 @@ public static class MotionService
         overlay.Visibility = Visibility.Collapsed;
     }
 
-    private static void AnimateTranslate(TranslateTransform translate, double value, int milliseconds)
+    private static void AnimateOpacity(FrameworkElement element, double value, int milliseconds)
     {
-        translate.BeginAnimation(TranslateTransform.YProperty, null);
-        if (ReducedMotion) { translate.Y = value; return; }
+        element.BeginAnimation(UIElement.OpacityProperty, null);
+        if (ReducedMotion) { element.Opacity = value; return; }
         var ease = new QuadraticEase { EasingMode = EasingMode.EaseOut };
         var animation = new DoubleAnimation(value, TimeSpan.FromMilliseconds(milliseconds)) { EasingFunction = ease };
-        translate.BeginAnimation(TranslateTransform.YProperty, animation);
+        element.BeginAnimation(UIElement.OpacityProperty, animation);
     }
 }

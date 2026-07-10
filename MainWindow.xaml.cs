@@ -38,7 +38,10 @@ public partial class MainWindow : Window
     private AppSettings _settings;
     private string _active = "系统优化";
     private int _renderVersion;
+    private int _topStatusVersion;
     private CleanerRunSummary? _lastCleanerSummary;
+    private HashSet<string>? _lastCleanerPreviewIds;
+    private bool _cleanerSelectionInitialized;
     private bool _forceDriverRefresh;
     private bool _optimizerComponentBusy;
     private bool _cleanerComponentBusy;
@@ -61,8 +64,10 @@ public partial class MainWindow : Window
     private int _hoverGeneration;
     private Func<Task>? _drawerPrimaryAction;
     private IInputElement? _drawerPreviousFocus;
+    private readonly Dictionary<string, PageCacheEntry> _pageCache = new(StringComparer.OrdinalIgnoreCase);
 
     private sealed record DownloadFailure(string Page, string Module, string Reason, string TargetDirectory, string Instruction);
+    private sealed record PageCacheEntry(List<UIElement> Content, List<UIElement> Actions, double ScrollOffset, DateTimeOffset CachedAt);
 
     public MainWindow()
     {
@@ -78,6 +83,7 @@ public partial class MainWindow : Window
             RenderNav();
             await RefreshTopStatusAsync();
             await SelectPageAsync(_active);
+            _ = WarmDriverCacheAsync();
         };
         Closed += (_, _) =>
         {
@@ -86,6 +92,12 @@ public partial class MainWindow : Window
             SettingsService.Save(_settings);
             if (!_settings.KeepLocalComponents) AppPaths.CleanupRuntimeComponents();
         };
+    }
+
+    private async Task WarmDriverCacheAsync()
+    {
+        try { await _drivers.GetPageDataAsync(); }
+        catch (Exception ex) { LogService.Write($"驱动页后台预热失败：{ex.Message}"); }
     }
 
     private void RenderNav()
@@ -129,6 +141,16 @@ public partial class MainWindow : Window
 
     private async Task SelectPageAsync(string name)
     {
+        var previousPage = _active;
+        var samePage = name.Equals(previousPage, StringComparison.OrdinalIgnoreCase);
+        var forceRender = samePage && ContentPanel.Children.Count > 0;
+        var preservedOffset = samePage ? ContentScrollViewer.VerticalOffset : 0;
+        if (!samePage && ContentPanel.Children.Count > 0)
+        {
+            _pageCache[previousPage] = new PageCacheEntry(ContentPanel.Children.Cast<UIElement>().ToList(), PageActionPanel.Children.Cast<UIElement>().ToList(), ContentScrollViewer.VerticalOffset, DateTimeOffset.Now);
+            ContentPanel.Children.Clear();
+            PageActionPanel.Children.Clear();
+        }
         var renderVersion = ++_renderVersion;
         HideHoverInfo();
         _active = name;
@@ -138,6 +160,20 @@ public partial class MainWindow : Window
         var category = _categories.First(x => x.Name == name);
         TitleText.Text = category.Name;
         SubtitleText.Text = category.Description;
+        if (!forceRender && _pageCache.Remove(name, out var cachedPage))
+        {
+            ContentPanel.Children.Clear();
+            PageActionPanel.Children.Clear();
+            foreach (var child in cachedPage.Content) ContentPanel.Children.Add(child);
+            foreach (var action in cachedPage.Actions) PageActionPanel.Children.Add(action);
+            ContentScrollViewer.ScrollToVerticalOffset(cachedPage.ScrollOffset);
+            StatusText.Text = $"就绪 · 缓存于 {cachedPage.CachedAt:HH:mm}";
+            _ = RefreshTopStatusAsync();
+            if (name == "系统优化") _ = RefreshCachedOptimizerIfStaleAsync(renderVersion);
+            else if (name == "驱动管理" && DateTimeOffset.Now - cachedPage.CachedAt > TimeSpan.FromMinutes(30)) _ = RefreshDriversInBackgroundAsync(renderVersion);
+            return;
+        }
+        _pageCache.Remove(name);
         ContentPanel.Children.Clear();
         PageActionPanel.Children.Clear();
         StatusText.Text = "正在加载...";
@@ -148,9 +184,11 @@ public partial class MainWindow : Window
             else if (name == "驱动管理") await RenderDriversAsync(renderVersion);
             else if (name == "工具箱") await RenderToolsAsync();
             else RenderSettings();
+            if (renderVersion != _renderVersion || !_active.Equals(name, StringComparison.OrdinalIgnoreCase)) return;
             await RefreshTopStatusAsync();
             StatusText.Text = "就绪";
-            ContentScrollViewer.ScrollToTop();
+            if (samePage) ContentScrollViewer.ScrollToVerticalOffset(preservedOffset);
+            else ContentScrollViewer.ScrollToTop();
             MotionService.FadeSlideIn(ContentPanel);
         }
         catch (Exception ex)
@@ -162,8 +200,21 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task RefreshCachedOptimizerIfStaleAsync(int renderVersion)
+    {
+        try
+        {
+            var items = await _optimizer.GetItemsAsync();
+            if (_optimizer.TryGetLiveStateCache(items, out _, out var stale) && stale)
+                await RefreshOptimizerStatesInBackgroundAsync(items, renderVersion, true);
+        }
+        catch (Exception ex) { LogService.Write($"缓存优化页后台刷新失败：{ex.Message}"); }
+    }
+
     private async Task RefreshTopStatusAsync()
     {
+        var version = ++_topStatusVersion;
+        var page = _active;
         TopStatusPanel.Children.Clear();
         AddStatusChip(AdminService.IsAdministrator ? "管理员权限" : "非管理员", AdminService.IsAdministrator ? "Green" : "Yellow");
         var runtime = EnvironmentService.RuntimeText();
@@ -172,6 +223,7 @@ public partial class MainWindow : Window
         if (_active == "系统优化")
         {
             var optimizer = await _optimizer.GetComponentStatusAsync();
+            if (version != _topStatusVersion || page != _active) return;
             if (_optimizerComponentBusy) optimizer = optimizer with { State = ComponentState.Downloading, Text = "获取远端服务中" };
             AddStatusChip(optimizer.State == ComponentState.Online ? "Optimizer 在线" : optimizer.State == ComponentState.Downloading ? "获取远端服务中" : "Optimizer 离线",
                 optimizer.State == ComponentState.Online ? "Green" : optimizer.State == ComponentState.Downloading ? "Yellow" : "Red");
@@ -179,6 +231,7 @@ public partial class MainWindow : Window
         else if (_active == "系统清理")
         {
             var cleaner = await _cleaner.GetStatusAsync();
+            if (version != _topStatusVersion || page != _active) return;
             if (_cleanerComponentBusy) cleaner = cleaner with { State = ComponentState.Downloading, Text = "获取远端服务中" };
             AddStatusChip(cleaner.State == ComponentState.Online ? "BleachBit 在线" : cleaner.State == ComponentState.Downloading ? "获取远端服务中" : "BleachBit 离线",
                 cleaner.State == ComponentState.Online ? "Green" : cleaner.State == ComponentState.Downloading ? "Yellow" : "Red");
@@ -300,11 +353,12 @@ public partial class MainWindow : Window
     private Border CreateOptimizerCard(OptimizerItem item, OptimizationStateInfo live, bool enabled)
     {
         var card = CardBorder();
+        MotionService.AttachCardMotion(card);
         card.Padding = new Thickness(16, 13, 14, 13);
         card.Height = 104;
         AttachHoverInfo(card, item.Description);
-        var applied = live.State == OptimizationLiveState.Optimized;
-        var canToggle = enabled && !_busyOptimizerIds.Contains(item.Id) && live.State is OptimizationLiveState.Default or OptimizationLiveState.Optimized;
+        var applied = live.State is OptimizationLiveState.Optimized or OptimizationLiveState.OptimizedWithSkips;
+        var canToggle = enabled && !_busyOptimizerIds.Contains(item.Id) && live.State is OptimizationLiveState.Default or OptimizationLiveState.Optimized or OptimizationLiveState.OptimizedWithSkips;
         card.Cursor = Cursors.Hand;
         card.Opacity = enabled ? 1 : 0.62;
 
@@ -314,7 +368,7 @@ public partial class MainWindow : Window
 
         var copy = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         var titleRow = new DockPanel { LastChildFill = true };
-        var badge = StateBadge(live.State);
+        var badge = StateBadge(live.State, live.SkippedTargets);
         DockPanel.SetDock(badge, Dock.Right);
         titleRow.Children.Add(badge);
         titleRow.Children.Add(new TextBlock
@@ -331,14 +385,14 @@ public partial class MainWindow : Window
         copy.Children.Add(titleRow);
         copy.Children.Add(new TextBlock
         {
-            Text = live.State is OptimizationLiveState.Mixed or OptimizationLiveState.Unknown ? live.Detail : item.Description,
+            Text = live.State is OptimizationLiveState.Mixed or OptimizationLiveState.Unknown or OptimizationLiveState.NeedsReview or OptimizationLiveState.OptimizedWithSkips ? live.Detail : item.Description,
             Foreground = item.Risk == "high" ? BrushOf("Red") : BrushOf("Muted"),
             FontSize = 11,
             Margin = new Thickness(0, 4, 8, 0),
             TextTrimming = TextTrimming.CharacterEllipsis,
             Height = 18
         });
-        var state = CreateOptimizerSwitch(item, live.State, canToggle);
+        var state = CreateOptimizerSwitch(item, live, canToggle);
         Grid.SetColumn(copy, 0);
         Grid.SetColumn(state, 1);
         root.Children.Add(copy);
@@ -348,13 +402,16 @@ public partial class MainWindow : Window
         return card;
     }
 
-    private Border StateBadge(OptimizationLiveState state)
+    private Border StateBadge(OptimizationLiveState state, int skippedTargets = 0)
     {
         var (text, color) = state switch
         {
             OptimizationLiveState.Default => ("未优化", "Muted"),
             OptimizationLiveState.Optimized => ("已优化", "Green"),
+            OptimizationLiveState.OptimizedWithSkips => ($"已优化·跳过{skippedTargets}项", "Green"),
             OptimizationLiveState.Mixed => ("混合", "Yellow"),
+            OptimizationLiveState.NeedsReview => ("需要确认", "Yellow"),
+            OptimizationLiveState.SafetyBlocked => ("安全阻止", "Yellow"),
             OptimizationLiveState.ExternallyManaged => ("策略管理", "Blue"),
             OptimizationLiveState.RestartRequired => ("需重启", "Yellow"),
             OptimizationLiveState.Unsupported => ("不适用", "Muted"),
@@ -389,9 +446,9 @@ public partial class MainWindow : Window
         _ => 999
     };
 
-    private Border CreateOptimizerSwitch(OptimizerItem item, OptimizationLiveState liveState, bool enabled)
+    private Border CreateOptimizerSwitch(OptimizerItem item, OptimizationStateInfo live, bool enabled)
     {
-        var applied = liveState == OptimizationLiveState.Optimized;
+        var applied = live.State is OptimizationLiveState.Optimized or OptimizationLiveState.OptimizedWithSkips;
         var pill = new Border
         {
             Width = 54,
@@ -420,29 +477,48 @@ public partial class MainWindow : Window
             pill.MouseLeftButtonUp += async (_, e) =>
             {
                 e.Handled = true;
-                await ToggleOptimizerAsync(item, liveState);
+                await ToggleOptimizerAsync(item, live);
             };
         }
         return pill;
     }
 
-    private async Task ToggleOptimizerAsync(OptimizerItem item, OptimizationLiveState state)
+    private async Task ToggleOptimizerAsync(OptimizerItem item, OptimizationStateInfo live)
     {
-        var applied = state == OptimizationLiveState.Optimized;
-        if (state is not (OptimizationLiveState.Default or OptimizationLiveState.Optimized))
+        var applied = live.State is OptimizationLiveState.Optimized or OptimizationLiveState.OptimizedWithSkips;
+        if (live.State is not (OptimizationLiveState.Default or OptimizationLiveState.Optimized or OptimizationLiveState.OptimizedWithSkips))
         {
-            ShowOptimizerStateDrawer(item, new OptimizationStateInfo(item.Id, state, "当前状态不能安全地直接切换，请先执行扫描恢复。", 0, 0));
+            ShowOptimizerStateDrawer(item, live);
+            return;
+        }
+        if (applied && live.Rollback != RollbackCapability.ExactSnapshot)
+        {
+            OpenDrawer("没有精确回退快照", item.Title,
+                new TextBlock { Text = "实时检测表明该项目已优化，但本地没有对应的操作前快照。为避免覆盖用户或其他软件的原有设置，只能先生成安全默认恢复预检。", TextWrapping = TextWrapping.Wrap, LineHeight = 22 },
+                "生成恢复预检", async () =>
+                {
+                    var plan = await _optimizer.BuildRestorePlanAsync(new[] { item.Id });
+                    ShowRestorePlanDrawer(plan);
+                });
+            return;
+        }
+        if (!applied && live.SkippedTargets > 0)
+        {
+            var skipped = new StackPanel();
+            skipped.Children.Add(new TextBlock { Text = $"适用目标将继续执行；以下 {live.SkippedTargets} 项只会被排除，不会强制创建或修改。", TextWrapping = TextWrapping.Wrap, LineHeight = 21, Margin = new Thickness(0, 0, 0, 12) });
+            AddOptimizationTargetGroup(skipped, "本机不适用／安全跳过", live.TargetDetails.Where(x => x.Applicability is TargetApplicability.NotApplicable or TargetApplicability.OptionalMissing or TargetApplicability.Unsafe or TargetApplicability.UnsupportedBuild), "Yellow");
+            OpenDrawer("确认跳过后继续", item.Title, skipped, $"确认并忽略 {live.SkippedTargets} 项", async () => await ExecuteOptimizerToggleAsync(item, false, true));
             return;
         }
         if (!applied && item.Risk == "high")
         {
-            OpenDrawer("高风险优化确认", item.Title, new TextBlock { Text = item.Description + "\n\n该操作可能改变 Windows 安全、更新或硬件兼容行为。执行前会创建精确快照。", TextWrapping = TextWrapping.Wrap, LineHeight = 22 }, "仍要执行", async () => await ExecuteOptimizerToggleAsync(item, false));
+            OpenDrawer("高风险优化确认", item.Title, new TextBlock { Text = item.Description + "\n\n该操作可能改变 Windows 安全、更新或硬件兼容行为。执行前会创建精确快照。", TextWrapping = TextWrapping.Wrap, LineHeight = 22 }, "仍要执行", async () => await ExecuteOptimizerToggleAsync(item, false, false));
             return;
         }
-        await ExecuteOptimizerToggleAsync(item, applied);
+        await ExecuteOptimizerToggleAsync(item, applied, false);
     }
 
-    private async Task ExecuteOptimizerToggleAsync(OptimizerItem item, bool applied)
+    private async Task ExecuteOptimizerToggleAsync(OptimizerItem item, bool applied, bool confirmSkips)
     {
         await CloseDrawerAsync();
         if (!_busyOptimizerIds.Add(item.Id)) return;
@@ -461,7 +537,7 @@ public partial class MainWindow : Window
                 else
                 {
                     StatusText.Text = $"正在优化：{item.Title}";
-                    await _optimizer.ApplyAsync(item, _shutdown.Token);
+                    await _optimizer.ApplyAsync(item, _shutdown.Token, confirmSkips);
                     StatusText.Text = $"已优化：{item.Title}";
                 }
             });
@@ -540,7 +616,7 @@ public partial class MainWindow : Window
             ComponentState.Downloading => "正在获取 BleachBit 组件，请稍候。",
             _ => "BleachBit 组件未就绪时无法预览或执行清理，请先获取清理组件。"
         };
-        var meta = status.State == ComponentState.Online ? $"{items.Count} 项可用" : ComponentMetaText(status);
+        var meta = status.State == ComponentState.Online ? $"{items.Count(x => x.Applicable)} 项适用 / {items.Count} 项定义" : ComponentMetaText(status);
         AddComponentHeader("BleachBit", CleanerService.PinnedVersion, description, meta, ComponentMetaColor(status), status.State != ComponentState.Online);
     }
 
@@ -548,10 +624,11 @@ public partial class MainWindow : Window
     {
         var available = items.Select(x => x.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         _selectedCleanerIds.RemoveWhere(x => !available.Contains(x));
-        if (_selectedCleanerIds.Count == 0)
+        if (!_cleanerSelectionInitialized)
         {
             foreach (var item in items.Where(x => x.DefaultSelected))
                 _selectedCleanerIds.Add(item.Id);
+            _cleanerSelectionInitialized = true;
         }
     }
 
@@ -559,6 +636,7 @@ public partial class MainWindow : Window
     {
         var card = CardBorder();
         card.Margin = new Thickness(0, 0, 0, 10);
+        card.Opacity = item.Applicable ? 1 : 0.62;
         var root = new Grid();
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -570,7 +648,7 @@ public partial class MainWindow : Window
             FontWeight = FontWeights.SemiBold,
             Foreground = item.Risk == "high" ? BrushOf("Red") : BrushOf("Text")
         });
-        copy.Children.Add(new TextBlock { Text = item.Description, Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 12, 0) });
+        copy.Children.Add(new TextBlock { Text = item.Description + $"\n{item.SelectionReason}" + (string.IsNullOrWhiteSpace(item.Warning) ? "" : $" · 注意：{item.Warning}"), Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 12, 0), LineHeight = 18 });
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         buttons.Children.Add(CreateCleanerSwitch(item));
         Grid.SetColumn(copy, 0);
@@ -592,7 +670,8 @@ public partial class MainWindow : Window
             Background = selected ? BrushOf("Blue") : BrushOf("Panel3"),
             BorderBrush = selected ? BrushOf("Blue") : BrushOf("Border"),
             BorderThickness = new Thickness(1),
-            Cursor = Cursors.Hand,
+            Cursor = item.Applicable ? Cursors.Hand : Cursors.Arrow,
+            IsEnabled = item.Applicable,
             Margin = new Thickness(10, 0, 0, 0)
         };
         var dot = new Ellipse
@@ -605,8 +684,10 @@ public partial class MainWindow : Window
         pill.Child = dot;
         pill.MouseLeftButtonUp += async (_, _) =>
         {
+            if (!item.Applicable) return;
             if (selected) _selectedCleanerIds.Remove(item.Id);
             else _selectedCleanerIds.Add(item.Id);
+            _lastCleanerPreviewIds = null;
             await SelectPageAsync("系统清理");
         };
         return pill;
@@ -618,6 +699,8 @@ public partial class MainWindow : Window
         _selectedCleanerIds.Clear();
         foreach (var item in items.Where(x => x.DefaultSelected))
             _selectedCleanerIds.Add(item.Id);
+        _cleanerSelectionInitialized = true;
+        _lastCleanerPreviewIds = null;
         _lastCleanerSummary = null;
         await SelectPageAsync("系统清理");
     }
@@ -635,6 +718,7 @@ public partial class MainWindow : Window
             {
                 var result = await _cleaner.RunAsync("--preview", ids, _shutdown.Token);
                 _lastCleanerSummary = result.Summary;
+                _lastCleanerPreviewIds = ids.ToHashSet(StringComparer.OrdinalIgnoreCase);
             }
             finally
             {
@@ -652,6 +736,8 @@ public partial class MainWindow : Window
             var items = await _cleaner.GetItemsAsync();
             var selected = items.Where(x => _selectedCleanerIds.Contains(x.Id)).ToList();
             if (selected.Count == 0) throw new InvalidOperationException("请至少选择一个清理项目。");
+            if (_lastCleanerPreviewIds == null || !_lastCleanerPreviewIds.SetEquals(selected.Select(x => x.Id)))
+                throw new InvalidOperationException("清理项目已经变化或尚未预览。请先点击“预览清理”，确认范围和预计释放空间后再执行。");
             var highRisk = selected.Where(x => x.Risk == "high").ToList();
             if (highRisk.Count > 0 && MessageBox.Show($"已选择 {highRisk.Count} 个高风险清理项，可能清除登录状态、历史记录或敏感缓存。确认继续吗？", "高风险确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
             _cleanerRunBusy = true;
@@ -752,22 +838,23 @@ public partial class MainWindow : Window
         AddActionButton("刷新", async () =>
         {
             _forceDriverRefresh = true;
-            _drivers.ClearCache();
             await SelectPageAsync("驱动管理");
         });
-        if (!_forceDriverRefresh && _drivers.TryGetPageCache(out var cached, out var stale) && cached != null)
+        var hasCached = _drivers.TryGetPageCache(out var cached, out var stale) && cached != null;
+        if (!_forceDriverRefresh && hasCached)
         {
-            RenderDriverData(cached);
+            RenderDriverData(cached!);
             if (stale) _ = RefreshDriversInBackgroundAsync(renderVersion);
             return;
         }
-        var loading = AddLoadingCard(_forceDriverRefresh ? "正在刷新驱动状态..." : "正在读取驱动状态...");
+        if (_forceDriverRefresh && hasCached) RenderDriverData(cached!);
+        var loading = AddLoadingCard(_forceDriverRefresh && hasCached ? "正在后台刷新驱动状态，当前仍显示上次结果..." : _forceDriverRefresh ? "正在刷新驱动状态..." : "正在读取驱动状态...");
         try
         {
             var data = await _drivers.GetPageDataAsync(_forceDriverRefresh);
             _forceDriverRefresh = false;
             if (renderVersion != _renderVersion || _active != "驱动管理") return;
-            ContentPanel.Children.Remove(loading);
+            ContentPanel.Children.Clear();
             RenderDriverData(data);
         }
         catch (Exception ex)
@@ -775,7 +862,7 @@ public partial class MainWindow : Window
             _forceDriverRefresh = false;
             if (renderVersion != _renderVersion || _active != "驱动管理") return;
             ContentPanel.Children.Remove(loading);
-            AddInfoCard("驱动状态加载失败", ex.Message, true);
+            AddInfoCard(hasCached ? "刷新失败，已保留上次结果" : "驱动状态加载失败", ex.Message, true);
             LogService.Write($"驱动状态加载失败：{ex}");
         }
     }
@@ -784,8 +871,13 @@ public partial class MainWindow : Window
     {
         try
         {
-            await _drivers.GetPageDataAsync(forceRefresh: true);
-            if (renderVersion == _renderVersion && _active == "驱动管理") StatusText.Text = $"驱动信息已在后台更新 · {DateTime.Now:HH:mm}";
+            var data = await _drivers.GetPageDataAsync(forceRefresh: true);
+            if (renderVersion == _renderVersion && _active == "驱动管理")
+            {
+                ContentPanel.Children.Clear();
+                RenderDriverData(data);
+                StatusText.Text = $"驱动信息已在后台更新 · {DateTime.Now:HH:mm}";
+            }
         }
         catch (Exception ex)
         {
@@ -800,8 +892,9 @@ public partial class MainWindow : Window
         var info = data.Device;
         var identity = data.Identity;
         var vendorText = string.IsNullOrWhiteSpace(info.VendorDisplayName) ? "暂无信息" : info.VendorDisplayName;
+        var confidenceSuffix = identity.Confidence == IdentityConfidence.High ? "" : $"  ·  {IdentityConfidenceText(identity.Confidence)}";
         var deviceCard = ActionCard(
-            $"当前设备  ·  {IdentityConfidenceText(identity.Confidence)}",
+            $"当前设备{confidenceSuffix}",
             $"{info.Manufacturer} · {info.Model}\n厂商：{vendorText}\n固件报告 {info.DeviceIdentifierLabel}：{DeviceIdentifierResolver.Mask(info.DeviceIdentifierValue)}\n身份摘要：{identity.StableDigest}\n驱动状态缓存：{data.CachedAt:yyyy-MM-dd HH:mm:ss}",
             identity.Confidence == IdentityConfidence.Low ? "Yellow" : identity.Confidence == IdentityConfidence.High ? "Green" : "Border");
         var deviceActions = (StackPanel)((Grid)deviceCard.Child).Children[1];
@@ -842,7 +935,7 @@ public partial class MainWindow : Window
 
     private static string IdentityConfidenceText(IdentityConfidence confidence) => confidence switch
     {
-        IdentityConfidence.High => "高置信度",
+        IdentityConfidence.High => "识别结果稳定",
         IdentityConfidence.Medium => "中等置信度",
         _ => "低置信度"
     };
@@ -853,7 +946,7 @@ public partial class MainWindow : Window
         content.Children.Add(new Border
         {
             Background = BrushOf(identity.Confidence == IdentityConfidence.Low ? "Panel3" : "BlueSoft"), CornerRadius = new CornerRadius(14), Padding = new Thickness(16), Margin = new Thickness(0, 0, 0, 14),
-            Child = new TextBlock { Text = $"{IdentityConfidenceText(identity.Confidence)}\n{identity.Summary}", TextWrapping = TextWrapping.Wrap, LineHeight = 22 }
+            Child = new TextBlock { Text = identity.Confidence == IdentityConfidence.High ? identity.Summary : $"{IdentityConfidenceText(identity.Confidence)}\n{identity.Summary}", TextWrapping = TextWrapping.Wrap, LineHeight = 22 }
         });
         foreach (var candidate in identity.Candidates)
         {
@@ -1427,7 +1520,6 @@ public partial class MainWindow : Window
             Padding = new Thickness(16),
             Margin = new Thickness(0, 0, 12, 12)
         };
-        MotionService.AttachCardMotion(card);
         return card;
     }
 
@@ -1556,22 +1648,41 @@ public partial class MainWindow : Window
     private void ShowOptimizerStateDrawer(OptimizerItem item, OptimizationStateInfo live)
     {
         var content = new StackPanel();
-        content.Children.Add(StateBadge(live.State));
+        content.Children.Add(StateBadge(live.State, live.SkippedTargets));
         content.Children.Add(new TextBlock { Text = live.Detail, TextWrapping = TextWrapping.Wrap, LineHeight = 22, Margin = new Thickness(0, 14, 0, 12) });
         AddOptimizationTargetGroup(content, "已优化部分", live.TargetDetails.Where(x => x.State == OptimizationTargetState.Optimized), "Green");
         AddOptimizationTargetGroup(content, "未优化／默认部分", live.TargetDetails.Where(x => x.State is OptimizationTargetState.Default or OptimizationTargetState.Unoptimized), "Blue");
-        AddOptimizationTargetGroup(content, "需要确认", live.TargetDetails.Where(x => x.State is not (OptimizationTargetState.Optimized or OptimizationTargetState.Default or OptimizationTargetState.Unoptimized)), "Yellow");
+        AddOptimizationTargetGroup(content, "本机不适用", live.TargetDetails.Where(x => x.Applicability is TargetApplicability.NotApplicable or TargetApplicability.OptionalMissing or TargetApplicability.UnsupportedBuild), "Yellow");
+        AddOptimizationTargetGroup(content, "安全跳过", live.TargetDetails.Where(x => x.Applicability == TargetApplicability.Unsafe || x.State == OptimizationTargetState.Skipped), "Yellow");
+        AddOptimizationTargetGroup(content, "读取失败／需要确认", live.TargetDetails.Where(x => x.Applicability == TargetApplicability.QueryFailed || x.State is OptimizationTargetState.Unknown or OptimizationTargetState.Diverged or OptimizationTargetState.ExternallyManaged), "Yellow");
         if (live.State == OptimizationLiveState.Mixed)
             content.Children.Add(new TextBlock { Text = "恢复会将该项目撤销到当前 Windows 的安全默认基线，并在执行前创建应急快照。它不会依赖 Applied 记录，但无法保证保留第三方程序写入的自定义值。", Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, LineHeight = 21, Margin = new Thickness(0, 10, 0, 0) });
         else if (live.State is OptimizationLiveState.Unknown or OptimizationLiveState.ExternallyManaged)
             content.Children.Add(new TextBlock { Text = "当前存在无法确认或外部管理的目标，已禁止通过普通开关盲目修改。", Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, LineHeight = 21, Margin = new Thickness(0, 10, 0, 0) });
-        OpenDrawer(item.Title, "逐目标实时系统状态", content, live.State == OptimizationLiveState.Mixed ? "尝试恢复默认" : "关闭", live.State == OptimizationLiveState.Mixed ? async () =>
+        Func<Task>? primaryAction = null;
+        var primaryText = "关闭";
+        if (live.State == OptimizationLiveState.Mixed)
         {
-            StatusText.Text = $"正在生成单项目恢复预检：{item.Title}";
-            var plan = await _optimizer.BuildRestorePlanAsync(new[] { item.Id });
-            ShowRestorePlanDrawer(plan);
-            StatusText.Text = "单项目恢复预检已完成";
-        } : null);
+            primaryText = "尝试恢复默认";
+            primaryAction = async () =>
+            {
+                StatusText.Text = $"正在生成单项目恢复预检：{item.Title}";
+                var plan = await _optimizer.BuildRestorePlanAsync(new[] { item.Id });
+                ShowRestorePlanDrawer(plan);
+                StatusText.Text = "单项目恢复预检已完成";
+            };
+        }
+        else if (live.State == OptimizationLiveState.OptimizedWithSkips)
+        {
+            primaryText = $"确认跳过 {live.SkippedTargets} 项";
+            primaryAction = async () =>
+            {
+                var count = await _optimizer.ConfirmSkippedTargetsAsync(item);
+                await CloseDrawerAsync();
+                StatusText.Text = $"已记录 {count} 个跳过目标；契约或系统版本变化后会自动重新确认";
+            };
+        }
+        OpenDrawer(item.Title, "逐目标实时系统状态", content, primaryText, primaryAction);
     }
 
     private void AddOptimizationTargetGroup(StackPanel host, string title, IEnumerable<OptimizationTargetInfo> source, string color)
@@ -1598,6 +1709,7 @@ public partial class MainWindow : Window
         OptimizationTargetState.Unoptimized => "未优化（保留原值）",
         OptimizationTargetState.Diverged => "其他值",
         OptimizationTargetState.Unavailable => "不可用",
+        OptimizationTargetState.Skipped => "安全跳过",
         OptimizationTargetState.ExternallyManaged => "外部策略",
         _ => "无法确认"
     };
@@ -1607,6 +1719,7 @@ public partial class MainWindow : Window
         OptimizationTargetState.Optimized => "Green",
         OptimizationTargetState.Default => "Blue",
         OptimizationTargetState.Unoptimized => "Blue",
+        OptimizationTargetState.Skipped => "Yellow",
         OptimizationTargetState.ExternallyManaged => "Blue",
         _ => "Yellow"
     };
@@ -1654,6 +1767,7 @@ public partial class MainWindow : Window
 
     private void ApplyTheme()
     {
+        _pageCache.Clear();
         var dark = _settings.ThemeMode.Equals("Dark", StringComparison.OrdinalIgnoreCase) ||
                    (_settings.ThemeMode.Equals("System", StringComparison.OrdinalIgnoreCase) && !SystemUsesLightTheme());
         if (dark)

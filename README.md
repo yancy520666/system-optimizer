@@ -11,8 +11,8 @@
 
 ## 功能特性
 
-- 系统优化：提供 24 个固定哈希的 OptimizerNXT 优化契约，使用真实注册表、服务与计划任务状态区分默认、已优化、混合和未知状态；卡片详情可查看逐目标依据并对混合项目尝试单项默认恢复。
-- 系统清理：基于 BleachBit 提供清理预览、一键清理、和清理结果统计等功能。
+- 系统优化：提供 24 个固定哈希的 OptimizerNXT 优化契约，使用真实注册表、服务与计划任务状态区分默认、已优化、已优化但跳过不适用项、混合和查询失败；任务按逻辑目标去重，执行后逐项验证，失败时自动回退本次修改。
+- 系统清理：合并 BleachBit XML 与内置系统项目，使用经过审核的均衡默认策略；敏感数据、备份、聊天记录、Defender 日志和未知项目默认不选，清理前必须先预览。
 - 驱动管理：分别识别厂商、型号、OEM 序列号、产品 UUID、主板与机箱信息，并按置信度引导到对应官方驱动中心；页面使用内存缓存和后台刷新避免重复 CIM 扫描。
 - 工具箱：整合常用 Windows 系统维护工具，支持按需下载和本地工具识别使用。
 - 设置管理：支持深色、浅色和跟随系统主题，以及本地组件保留策略。
@@ -40,7 +40,7 @@ dotnet publish -c Release -r win-x64 --self-contained false -o publish
 启动程序位于：
 
 ```text
-SystemOptimizerLite-v3.0-lite-win-x64.zip/SystemOptimizerLite.exe
+SystemOptimizerLite-v3.1-lite-win-x64.zip/SystemOptimizerLite.exe
 ```
 
 需要目标电脑已安装 .NET 8 Desktop Runtime。

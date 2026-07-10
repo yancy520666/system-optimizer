@@ -13,7 +13,7 @@
     "defaultChecked": false,
     "enabledByDefault": false,
     "statusCheck": "system",
-    "description": "优化 NTFS、透明效果、网络节流、多媒体、资源管理器和遥测服务。注意本功能会导致win11视觉效果变差。"
+    "description": "安全模式仅关闭透明效果；旧版服务批量禁用、强制结束超时、崩溃转储和未验证多媒体参数均不会执行。"
   },
   {
     "id": "PrivacyTelemetryHardening",
@@ -93,7 +93,7 @@
     "defaultChecked": true,
     "enabledByDefault": true,
     "statusCheck": "service",
-    "description": "关闭 Game Bar、Xbox 后台服务和游戏录制功能，减少游戏时后台干扰。"
+    "description": "关闭 Game Bar 与 Game DVR 录制策略；保留 Xbox 登录、云存档、网络和手柄服务。"
   },
   {
     "id": "DisableSuperfetch",
@@ -125,7 +125,7 @@
     "defaultChecked": true,
     "enabledByDefault": true,
     "statusCheck": "browser",
-    "description": "关闭 Chrome 遥测、反馈收集、清理报告和软件报告工具。"
+    "description": "关闭 Chrome 遥测、反馈和清理报告策略；不再使用缺少可靠恢复机制的进程阻止规则。"
   },
   {
     "id": "DisableEdgeTelemetry",
@@ -205,7 +205,7 @@
     "defaultChecked": false,
     "enabledByDefault": false,
     "statusCheck": "service",
-    "description": "关闭 CEIP、AppCompat、实验功能、用户活动发布和相关计划任务。"
+    "description": "仅关闭已审核的 Windows 遥测服务、CEIP/SQM/反馈策略与任务；保留更新、安全、兼容、磁盘诊断和时间同步功能。"
   },
   {
     "id": "DisableVSTelemetry",

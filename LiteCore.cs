@@ -18,7 +18,7 @@ namespace SystemOptimizerLite;
 
 public enum ComponentState { Missing, Downloading, Online, Error }
 public enum OptimizationLiveState { Default, Optimized, Mixed, ExternallyManaged, RestartRequired, Unsupported, Unknown }
-public enum OptimizationTargetState { Default, Optimized, Diverged, Unavailable, ExternallyManaged, Unknown }
+public enum OptimizationTargetState { Default, Unoptimized, Optimized, Diverged, Unavailable, ExternallyManaged, Unknown }
 public enum RestoreItemStatus { Restored, AlreadyDefault, Partial, Skipped, Failed, RestartRequired }
 public enum IdentityConfidence { High, Medium, Low }
 
@@ -749,14 +749,17 @@ public sealed class OptimizerService
                 using var key = OpenKey(desired.Hive, desired.Path, false);
                 var current = key?.GetValue(desired.Name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
                 var exists = current != null;
+                var kindMatches = exists && RegistryKindMatches(key!.GetValueKind(desired.Name), desired.Kind);
                 if (desired.Delete)
                     details.Add(new OptimizationTargetInfo("注册表", target, exists ? OptimizationTargetState.Default : OptimizationTargetState.Optimized, explanation + "\n当前状态：" + (exists ? "目标值仍存在，当前未应用删除优化。" : "目标值不存在，符合优化状态。")));
-                else if (exists && RegistryMatches(current!, desired))
+                else if (exists && kindMatches && RegistryMatches(current!, desired))
                     details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Optimized, explanation + "\n当前状态：当前值与优化契约一致。"));
                 else if (!exists)
                     details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Default, explanation + "\n当前状态：工具写入值不存在，处于未配置状态。"));
+                else if (kindMatches)
+                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Unoptimized, explanation + "\n当前状态：当前值与优化值不同，属于软件或用户已有的未优化设置，将予以保留。"));
                 else
-                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Diverged, explanation + "\n当前状态：当前值既不匹配优化值，也不是未配置状态。"));
+                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Diverged, explanation + "\n当前状态：注册表值类型与 YAML 契约不一致，需要确认来源。"));
             }
             catch (Exception ex) { details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Unknown, explanation + "\n当前状态：读取失败，" + ex.Message)); }
         }
@@ -800,7 +803,7 @@ public sealed class OptimizerService
         }
         var total = details.Count;
         var optimized = details.Count(x => x.State == OptimizationTargetState.Optimized);
-        var defaults = details.Count(x => x.State == OptimizationTargetState.Default);
+        var defaults = details.Count(x => x.State is OptimizationTargetState.Default or OptimizationTargetState.Unoptimized);
         var unresolved = total - optimized - defaults;
         if (total == 0) return new OptimizationStateInfo(item.Id, OptimizationLiveState.Unknown, "没有可验证目标。", 0, 0, details);
         var aggregate = AggregateTargetStates(details.Select(x => x.State));
@@ -808,9 +811,9 @@ public sealed class OptimizerService
         {
             OptimizationLiveState.ExternallyManaged => "部分目标由外部策略管理。",
             OptimizationLiveState.Optimized => "所有目标均处于优化状态。",
-            OptimizationLiveState.Mixed => $"{optimized}/{total} 已优化，{defaults} 项为默认状态，{unresolved} 项无法确认。",
-            OptimizationLiveState.Default => "当前符合安全默认基线。",
-            _ => $"0/{total} 已优化，{defaults} 项为默认状态，{unresolved} 项无法确认。"
+            OptimizationLiveState.Mixed => $"{optimized}/{total} 已优化，{defaults} 项未优化，{unresolved} 项无法确认。",
+            OptimizationLiveState.Default => "当前没有目标处于优化值；软件或用户已有设置将保持不变。",
+            _ => $"0/{total} 已优化，{defaults} 项未优化，{unresolved} 项无法确认。"
         };
         return new OptimizationStateInfo(item.Id, aggregate, detail, optimized, total, details);
     }
@@ -823,7 +826,7 @@ public sealed class OptimizerService
         var optimized = states.Count(x => x == OptimizationTargetState.Optimized);
         if (optimized == states.Count) return OptimizationLiveState.Optimized;
         if (optimized > 0) return OptimizationLiveState.Mixed;
-        return states.All(x => x == OptimizationTargetState.Default) ? OptimizationLiveState.Default : OptimizationLiveState.Unknown;
+        return states.All(x => x is OptimizationTargetState.Default or OptimizationTargetState.Unoptimized) ? OptimizationLiveState.Default : OptimizationLiveState.Unknown;
     }
 
     private static List<RestoreResult> RestoreBaseline(OptimizerItem item)
@@ -836,8 +839,19 @@ public sealed class OptimizerService
             {
                 if (desired.Delete) { results.Add(new RestoreResult("registry", $"{desired.Hive}\\{desired.Path}\\{desired.Name}", false, "优化曾删除原值，安全基线无法推导其内容；请使用精确快照回退。")); continue; }
                 using var key = OpenKey(desired.Hive, desired.Path, true);
-                key?.DeleteValue(desired.Name, false);
-                results.Add(new RestoreResult("registry", $"{desired.Hive}\\{desired.Path}\\{desired.Name}", true, "已移除工具写入值，恢复为未配置。"));
+                var current = key?.GetValue(desired.Name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+                if (current == null)
+                {
+                    results.Add(new RestoreResult("registry", $"{desired.Hive}\\{desired.Path}\\{desired.Name}", true, "工具写入值不存在，无需恢复。"));
+                    continue;
+                }
+                if (!RegistryKindMatches(key!.GetValueKind(desired.Name), desired.Kind) || !RegistryMatches(current, desired))
+                {
+                    results.Add(new RestoreResult("registry", $"{desired.Hive}\\{desired.Path}\\{desired.Name}", true, "当前值不是 YAML 优化值，判定为软件或用户已有设置并予以保留。"));
+                    continue;
+                }
+                key.DeleteValue(desired.Name, false);
+                results.Add(new RestoreResult("registry", $"{desired.Hive}\\{desired.Path}\\{desired.Name}", true, "已移除确认属于该 YAML 的优化值，恢复为未配置。"));
             }
             catch (Exception ex) { results.Add(new RestoreResult("registry", desired.Name, false, ex.Message)); }
         }
@@ -950,6 +964,17 @@ public sealed class OptimizerService
         }
         return current.ToString()?.Equals(expected, StringComparison.OrdinalIgnoreCase) == true;
     }
+
+    private static bool RegistryKindMatches(RegistryValueKind current, string expected) => expected.ToLowerInvariant() switch
+    {
+        "dword" => current == RegistryValueKind.DWord,
+        "qword" => current == RegistryValueKind.QWord,
+        "string" or "sz" => current == RegistryValueKind.String,
+        "expandstring" or "expandsz" => current == RegistryValueKind.ExpandString,
+        "multistring" or "multisz" => current == RegistryValueKind.MultiString,
+        "binary" => current == RegistryValueKind.Binary,
+        _ => true
+    };
 
     private static bool SupportsCurrentWindows(string windows)
     {

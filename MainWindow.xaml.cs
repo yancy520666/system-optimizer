@@ -352,7 +352,7 @@ public partial class MainWindow : Window
     {
         var (text, color) = state switch
         {
-            OptimizationLiveState.Default => ("默认", "Muted"),
+            OptimizationLiveState.Default => ("未优化", "Muted"),
             OptimizationLiveState.Optimized => ("已优化", "Green"),
             OptimizationLiveState.Mixed => ("混合", "Yellow"),
             OptimizationLiveState.ExternallyManaged => ("策略管理", "Blue"),
@@ -1559,8 +1559,8 @@ public partial class MainWindow : Window
         content.Children.Add(StateBadge(live.State));
         content.Children.Add(new TextBlock { Text = live.Detail, TextWrapping = TextWrapping.Wrap, LineHeight = 22, Margin = new Thickness(0, 14, 0, 12) });
         AddOptimizationTargetGroup(content, "已优化部分", live.TargetDetails.Where(x => x.State == OptimizationTargetState.Optimized), "Green");
-        AddOptimizationTargetGroup(content, "未优化／默认部分", live.TargetDetails.Where(x => x.State == OptimizationTargetState.Default), "Blue");
-        AddOptimizationTargetGroup(content, "需要确认", live.TargetDetails.Where(x => x.State is not (OptimizationTargetState.Optimized or OptimizationTargetState.Default)), "Yellow");
+        AddOptimizationTargetGroup(content, "未优化／默认部分", live.TargetDetails.Where(x => x.State is OptimizationTargetState.Default or OptimizationTargetState.Unoptimized), "Blue");
+        AddOptimizationTargetGroup(content, "需要确认", live.TargetDetails.Where(x => x.State is not (OptimizationTargetState.Optimized or OptimizationTargetState.Default or OptimizationTargetState.Unoptimized)), "Yellow");
         if (live.State == OptimizationLiveState.Mixed)
             content.Children.Add(new TextBlock { Text = "恢复会将该项目撤销到当前 Windows 的安全默认基线，并在执行前创建应急快照。它不会依赖 Applied 记录，但无法保证保留第三方程序写入的自定义值。", Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, LineHeight = 21, Margin = new Thickness(0, 10, 0, 0) });
         else if (live.State is OptimizationLiveState.Unknown or OptimizationLiveState.ExternallyManaged)
@@ -1595,6 +1595,7 @@ public partial class MainWindow : Window
     {
         OptimizationTargetState.Optimized => "已优化",
         OptimizationTargetState.Default => "默认／未优化",
+        OptimizationTargetState.Unoptimized => "未优化（保留原值）",
         OptimizationTargetState.Diverged => "其他值",
         OptimizationTargetState.Unavailable => "不可用",
         OptimizationTargetState.ExternallyManaged => "外部策略",
@@ -1605,6 +1606,7 @@ public partial class MainWindow : Window
     {
         OptimizationTargetState.Optimized => "Green",
         OptimizationTargetState.Default => "Blue",
+        OptimizationTargetState.Unoptimized => "Blue",
         OptimizationTargetState.ExternallyManaged => "Blue",
         _ => "Yellow"
     };

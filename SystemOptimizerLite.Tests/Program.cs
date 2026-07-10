@@ -32,9 +32,17 @@ Assert(updateTool.GetProperty("sha256").GetString()?.Length == 64, "The combined
 var aggregate = typeof(OptimizerService).GetMethod("AggregateTargetStates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 OptimizationLiveState Aggregate(params OptimizationTargetState[] states) => (OptimizationLiveState)aggregate.Invoke(null, new object[] { states })!;
 Assert(Aggregate(OptimizationTargetState.Default, OptimizationTargetState.Default) == OptimizationLiveState.Default, "All-default targets must aggregate to Default.");
+Assert(Aggregate(OptimizationTargetState.Default, OptimizationTargetState.Unoptimized) == OptimizationLiveState.Default, "Existing non-optimized values must remain safely switchable instead of becoming Unknown.");
 Assert(Aggregate(OptimizationTargetState.Optimized, OptimizationTargetState.Optimized) == OptimizationLiveState.Optimized, "All-optimized targets must aggregate to Optimized.");
 Assert(Aggregate(OptimizationTargetState.Optimized, OptimizationTargetState.Default) == OptimizationLiveState.Mixed, "Optimized plus default targets must aggregate to Mixed.");
+Assert(Aggregate(OptimizationTargetState.Optimized, OptimizationTargetState.Unoptimized) == OptimizationLiveState.Mixed, "Optimized plus preserved external values must aggregate to Mixed.");
 Assert(Aggregate(OptimizationTargetState.Default, OptimizationTargetState.Diverged, OptimizationTargetState.Unknown) == OptimizationLiveState.Unknown, "Zero optimized targets with unresolved values must not aggregate to Mixed.");
+
+var kindMatches = typeof(OptimizerService).GetMethod("RegistryKindMatches", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+var registryMatches = typeof(OptimizerService).GetMethod("RegistryMatches", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+var qmDesired = new RegistryDesired("HKCU", @"SOFTWARE\Microsoft\Office\16.0\Common", "QMEnable", "DWord", "0", false, "Disable Office QM and Feedback");
+Assert((bool)kindMatches.Invoke(null, new object[] { Microsoft.Win32.RegistryValueKind.DWord, "DWord" })!, "QMEnable DWORD type must be recognized as compatible.");
+Assert(!(bool)registryMatches.Invoke(null, new object[] { 2, qmDesired })!, "QMEnable=2 must be recognized as a legitimate non-optimized value, not the YAML value 0.");
 
 var trusted = new DeviceIdentity("OEM BIOS", "ABC12345", "Contoso", "Model 1", "SKU", "Contoso", "Model 1", "ABC12345", "SKU", "11111111-2222-3333-4444-555555555555", "Contoso", "Board 1", "BOARD123", "BOARD123");
 var trustedResult = DeviceIdentifierResolver.Assess(trusted);

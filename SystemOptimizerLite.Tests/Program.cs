@@ -71,4 +71,9 @@ if (Directory.Exists(runtime))
 }
 Assert(genericRegistryExplanations.Count == 0, "Generic registry explanations remain:\n" + string.Join("\n", genericRegistryExplanations));
 
+var restoreTask = typeof(OptimizerService).GetMethod("SetScheduledTaskEnabledForRestore", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+var missingTaskResult = (RestoreResult)restoreTask.Invoke(null, new object[] { @"\SystemOptimizerLite\Tests\DefinitelyMissing", true })!;
+Assert(missingTaskResult.Ok, "A scheduled task absent from the current Windows build must be skipped instead of failing default restore: " + missingTaskResult.Message);
+Assert(missingTaskResult.Message.Contains("不适用项跳过", StringComparison.Ordinal), "Missing scheduled task result must explain the localized skip reason.");
+
 Console.WriteLine("All WindowsLite reliability smoke tests passed.");

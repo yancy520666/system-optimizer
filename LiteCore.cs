@@ -856,8 +856,7 @@ public sealed class OptimizerService
         {
             if (TryTaskName(command, out var task))
             {
-                var r = RunSystemCommand("schtasks.exe", $"/change /tn \"{task}\" /enable");
-                results.Add(new RestoreResult("task", task, r.Ok || r.Output.Contains("cannot find", StringComparison.OrdinalIgnoreCase), r.Output));
+                results.Add(SetScheduledTaskEnabledForRestore(task, true));
             }
             else if (command.Contains("fsutil", StringComparison.OrdinalIgnoreCase) && command.Contains("disablelastaccess", StringComparison.OrdinalIgnoreCase))
             {
@@ -935,8 +934,7 @@ public sealed class OptimizerService
         }
         foreach (var task in new[] { @"\Microsoft\Windows\Windows Defender\Windows Defender Cache Maintenance", @"\Microsoft\Windows\Windows Defender\Windows Defender Cleanup", @"\Microsoft\Windows\Windows Defender\Windows Defender Scheduled Scan", @"\Microsoft\Windows\Windows Defender\Windows Defender Verification" })
         {
-            var enabled = RunSystemCommand("schtasks.exe", $"/change /tn \"{task}\" /enable");
-            results.Add(new RestoreResult("task", task, enabled.Ok || enabled.Output.Contains("cannot find", StringComparison.OrdinalIgnoreCase), enabled.Output));
+            results.Add(SetScheduledTaskEnabledForRestore(task, true));
         }
         return new RestoreReport(results.All(x => x.Ok), results);
     }
@@ -1295,6 +1293,37 @@ public sealed class OptimizerService
         return new TaskSnapshot(name, result.Ok, result.Ok && !result.Output.Contains("<Enabled>false</Enabled>", StringComparison.OrdinalIgnoreCase));
     }
 
+    private static RestoreResult SetScheduledTaskEnabledForRestore(string name, bool enabled)
+    {
+        var presence = QueryScheduledTaskPresence(name);
+        if (!presence.Ok)
+            return new RestoreResult("task", name, false, "无法确认计划任务是否存在：" + presence.Message);
+        if (!presence.Exists)
+            return new RestoreResult("task", name, true, "当前 Windows 未安装或已经移除此计划任务，按不适用项跳过。");
+        var changed = RunSystemCommand("schtasks.exe", $"/change /tn \"{name}\" /{(enabled ? "enable" : "disable")}");
+        return new RestoreResult("task", name, changed.Ok, changed.Ok ? (enabled ? "计划任务已恢复为启用状态。" : "计划任务已恢复为禁用状态。") : changed.Output);
+    }
+
+    private static (bool Ok, bool Exists, string Message) QueryScheduledTaskPresence(string fullName)
+    {
+        var normalized = fullName.Replace('/', '\\');
+        var separator = normalized.LastIndexOf('\\');
+        if (separator < 0 || separator == normalized.Length - 1) return (false, false, "计划任务路径格式无效。");
+        var taskPath = normalized[..(separator + 1)];
+        if (!taskPath.StartsWith('\\')) taskPath = "\\" + taskPath;
+        var taskName = normalized[(separator + 1)..];
+        var escapedPath = taskPath.Replace("'", "''");
+        var escapedName = taskName.Replace("'", "''");
+        var script = $"$ProgressPreference='SilentlyContinue';$t=Get-ScheduledTask -TaskPath '{escapedPath}' -TaskName '{escapedName}' -ErrorAction SilentlyContinue;if($null -eq $t){{'SYSTEMOPTIMIZER_TASK_MISSING'}}else{{'SYSTEMOPTIMIZER_TASK_PRESENT'}}";
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        var query = RunSystemCommand("powershell.exe", $"-NoProfile -EncodedCommand {encoded}");
+        if (!query.Ok) return (false, false, query.Output);
+        var present = query.Output.LastIndexOf("SYSTEMOPTIMIZER_TASK_PRESENT", StringComparison.Ordinal);
+        var missing = query.Output.LastIndexOf("SYSTEMOPTIMIZER_TASK_MISSING", StringComparison.Ordinal);
+        if (present >= 0 || missing >= 0) return (true, present > missing, "");
+        return (false, false, "计划任务查询没有返回有效状态。");
+    }
+
     private static AclSnapshot CaptureAcl(string path)
     {
         var expanded = Environment.ExpandEnvironmentVariables(path);
@@ -1391,8 +1420,7 @@ public sealed class OptimizerService
         foreach (var task in snapshot.Tasks)
         {
             if (!task.Exists) { results.Add(new RestoreResult("task", task.Name, true, "执行前不存在，无需恢复")); continue; }
-            var result = RunSystemCommand("schtasks.exe", $"/change /tn \"{task.Name}\" /{(task.Enabled ? "enable" : "disable")}");
-            results.Add(new RestoreResult("task", task.Name, result.Ok, result.Output));
+            results.Add(SetScheduledTaskEnabledForRestore(task.Name, task.Enabled));
         }
         foreach (var acl in snapshot.Acls)
         {

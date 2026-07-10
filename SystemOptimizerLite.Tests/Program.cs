@@ -47,6 +47,7 @@ Assert(conflictResult.Confidence == IdentityConfidence.Low, "Conflicting firmwar
 Assert(conflictResult.Conflicts.Count > 0, "Low confidence conflict must include an explanation.");
 
 var runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SystemOptimizerLite", "runtime", "optimizerNXT");
+var genericRegistryExplanations = new List<string>();
 if (Directory.Exists(runtime))
 {
     var parser = typeof(OptimizerService).GetMethod("ExtractSnapshotTargets", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
@@ -58,7 +59,16 @@ if (Directory.Exists(runtime))
         var parsed = (SnapshotTargets)parser.Invoke(null, new object[] { yamlPath })!;
         Assert(parsed.RegistryDesired.Count + parsed.ServiceDesired.Count + parsed.Commands.Count > 0, $"{yamlName} has no verifiable targets.");
         Assert(parsed.Commands.All(command => command.Contains("schtasks", StringComparison.OrdinalIgnoreCase) || command.Contains("fsutil", StringComparison.OrdinalIgnoreCase) || command.Contains("icacls", StringComparison.OrdinalIgnoreCase)), $"{yamlName} contains an unsupported command.");
+        foreach (var registry in parsed.RegistryDesired)
+        {
+            var explanation = RegistryEffectCatalog.Describe(registry);
+            Assert(!string.IsNullOrWhiteSpace(registry.ActionName), $"{yamlName} registry target {registry.Name} lost its YAML action context.");
+            Assert(explanation.Contains("功能作用：", StringComparison.Ordinal) && explanation.Contains("优化后效果：", StringComparison.Ordinal), $"{yamlName} registry target {registry.Name} has no complete Chinese explanation.");
+            Assert(explanation.Length >= 20, $"{yamlName} registry target {registry.Name} explanation is too vague.");
+            if (explanation.Contains("该优化项目对应的 Windows 或软件策略参数", StringComparison.Ordinal)) genericRegistryExplanations.Add($"{yamlName}: {registry.Name} ({registry.ActionName})");
+        }
     }
 }
+Assert(genericRegistryExplanations.Count == 0, "Generic registry explanations remain:\n" + string.Join("\n", genericRegistryExplanations));
 
 Console.WriteLine("All WindowsLite reliability smoke tests passed.");

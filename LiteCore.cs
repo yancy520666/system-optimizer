@@ -743,21 +743,22 @@ public sealed class OptimizerService
         foreach (var desired in targets.RegistryDesired)
         {
             var target = $"{desired.Hive}\\{desired.Path}\\{desired.Name}";
+            var explanation = RegistryEffectCatalog.Describe(desired);
             try
             {
                 using var key = OpenKey(desired.Hive, desired.Path, false);
                 var current = key?.GetValue(desired.Name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
                 var exists = current != null;
                 if (desired.Delete)
-                    details.Add(new OptimizationTargetInfo("注册表", target, exists ? OptimizationTargetState.Default : OptimizationTargetState.Optimized, exists ? "目标值仍存在，当前未应用删除优化。" : "目标值不存在，符合优化状态。"));
+                    details.Add(new OptimizationTargetInfo("注册表", target, exists ? OptimizationTargetState.Default : OptimizationTargetState.Optimized, explanation + "\n当前状态：" + (exists ? "目标值仍存在，当前未应用删除优化。" : "目标值不存在，符合优化状态。")));
                 else if (exists && RegistryMatches(current!, desired))
-                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Optimized, "当前值与优化契约一致。"));
+                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Optimized, explanation + "\n当前状态：当前值与优化契约一致。"));
                 else if (!exists)
-                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Default, "工具写入值不存在，处于未配置状态。"));
+                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Default, explanation + "\n当前状态：工具写入值不存在，处于未配置状态。"));
                 else
-                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Diverged, "当前值既不匹配优化值，也不是未配置状态。"));
+                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Diverged, explanation + "\n当前状态：当前值既不匹配优化值，也不是未配置状态。"));
             }
-            catch (Exception ex) { details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Unknown, ex.Message)); }
+            catch (Exception ex) { details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Unknown, explanation + "\n当前状态：读取失败，" + ex.Message)); }
         }
         foreach (var desired in targets.ServiceDesired)
         {
@@ -1187,11 +1188,14 @@ public sealed class OptimizerService
         var targets = new SnapshotTargets();
         if (!File.Exists(yaml)) return targets;
         string? hive = null, path = null, mode = null, serviceMode = null;
+        var actionName = "";
         var inFiles = false;
         foreach (var raw in File.ReadLines(yaml, Encoding.UTF8))
         {
             var line = Regex.Replace(raw, @"\s+#.*$", "").Trim();
             if (string.IsNullOrWhiteSpace(line)) continue;
+            var action = Regex.Match(line, @"^-\s*name:\s*(.+)$", RegexOptions.IgnoreCase);
+            if (action.Success) actionName = CleanYamlScalar(action.Groups[1].Value);
             var top = Regex.Match(line, @"^([A-Za-z0-9_.-]+):\s*$");
             if (top.Success && !raw.StartsWith(' ') && !raw.StartsWith('\t'))
             {
@@ -1213,9 +1217,9 @@ public sealed class OptimizerService
                 var valueName = typed.Success ? typed.Groups["name"].Value : key.Success ? key.Groups[1].Value : list.Success ? list.Groups[1].Value : name.Success ? name.Groups[1].Value : "";
                 valueName = CleanYamlScalar(valueName);
                 if (typed.Success)
-                    targets.RegistryDesired.Add(new RegistryDesired(hive, path, valueName, CleanYamlScalar(typed.Groups["type"].Value), CleanYamlScalar(typed.Groups["value"].Value), false));
+                    targets.RegistryDesired.Add(new RegistryDesired(hive, path, valueName, CleanYamlScalar(typed.Groups["type"].Value), CleanYamlScalar(typed.Groups["value"].Value), false, actionName));
                 else if (!string.IsNullOrWhiteSpace(valueName) && Regex.IsMatch(mode, "delete|remove", RegexOptions.IgnoreCase))
-                    targets.RegistryDesired.Add(new RegistryDesired(hive, path, valueName, "", "", true));
+                    targets.RegistryDesired.Add(new RegistryDesired(hive, path, valueName, "", "", true, actionName));
                 if (typed.Success || !string.IsNullOrWhiteSpace(valueName)) targets.Registry.Add(new RegistryTarget(hive, path, valueName));
             }
             var serviceHeader = Regex.Match(line, @"^(stop|disable|enable|demand|start|services):\s*$", RegexOptions.IgnoreCase);
@@ -2435,7 +2439,7 @@ public static class AtomicFile
 
 public sealed record ProcessResult(int ExitCode, string Output, bool Succeeded, bool TimedOut, bool HadKnownInstanceError);
 public sealed record RegistryTarget(string Hive, string Path, string Name);
-public sealed record RegistryDesired(string Hive, string Path, string Name, string Kind, string Value, bool Delete);
+public sealed record RegistryDesired(string Hive, string Path, string Name, string Kind, string Value, bool Delete, string ActionName = "");
 public sealed record ServiceDesired(string Name, string Mode);
 public sealed class SnapshotTargets
 {

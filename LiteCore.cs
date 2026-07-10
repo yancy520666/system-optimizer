@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -16,6 +17,10 @@ using System.Xml.Linq;
 namespace SystemOptimizerLite;
 
 public enum ComponentState { Missing, Downloading, Online, Error }
+public enum OptimizationLiveState { Default, Optimized, Mixed, ExternallyManaged, RestartRequired, Unsupported, Unknown }
+public enum OptimizationTargetState { Default, Optimized, Diverged, Unavailable, ExternallyManaged, Unknown }
+public enum RestoreItemStatus { Restored, AlreadyDefault, Partial, Skipped, Failed, RestartRequired }
+public enum IdentityConfidence { High, Medium, Low }
 
 public record CategoryInfo(string Name, string Description);
 public record OptimizerItem(string Id, string Title, string Description, string Tab, string Group, string Risk, string YamlFile, bool SigRequired, string Icon, string Windows, string Category, bool DefaultChecked, bool EnabledByDefault, int Order);
@@ -25,6 +30,24 @@ public record CleanerRunSummary(string Mode, int SelectedItems, int FileCount, l
 public record CleanerRunResult(string Output, CleanerRunSummary Summary);
 public record ToolItem(string Id, string Name, string Description, string AssetName, string DownloadUrl, string Sha256, bool Dangerous, List<string> Aliases);
 public record DriverStatusItem(string Name, string Detail, string Status);
+public record OptimizationContract(string Id, string YamlSha256, string SigSha256);
+public record OptimizationTargetInfo(string Kind, string Target, OptimizationTargetState State, string Detail);
+public record OptimizationStateInfo(string Id, OptimizationLiveState State, string Detail, int MatchedTargets, int TotalTargets, List<OptimizationTargetInfo>? Targets = null)
+{
+    public IReadOnlyList<OptimizationTargetInfo> TargetDetails => Targets ?? [];
+}
+public record RestorePlanItem(string Id, string Title, OptimizationLiveState CurrentState, string Detail, bool WillChange, bool RequiresRestart);
+public record RestorePlan(List<RestorePlanItem> Items, DateTimeOffset CreatedAt)
+{
+    public int ChangeCount => Items.Count(x => x.WillChange);
+}
+public record RestoreItemResult(string Id, string Title, RestoreItemStatus Status, string Detail);
+public record RestoreExecutionReport(List<RestoreItemResult> Items, DateTimeOffset CompletedAt, string ReportPath)
+{
+    public bool Ok => Items.All(x => x.Status is RestoreItemStatus.Restored or RestoreItemStatus.AlreadyDefault or RestoreItemStatus.Skipped or RestoreItemStatus.RestartRequired);
+}
+public record IdentityCandidate(string Kind, string Source, string Label, string Value, string MaskedValue, bool Valid, string Note);
+public record DeviceIdentityAssessment(IdentityConfidence Confidence, string Summary, List<IdentityCandidate> Candidates, List<string> Conflicts, bool IsVirtualMachine, string StableDigest);
 public record DeviceIdentity(
     string BiosManufacturer,
     string BiosSerialNumber,
@@ -35,9 +58,11 @@ public record DeviceIdentity(
     string ProductName,
     string ProductIdentifyingNumber,
     string ProductSkuNumber,
+    string ProductUuid,
     string BaseBoardManufacturer,
     string BaseBoardProduct,
-    string BaseBoardSerialNumber);
+    string BaseBoardSerialNumber,
+    string ChassisSerialNumber);
 public record DeviceDisplayIdentifier(string Label, string Value);
 public record DeviceMatchInfo(
     string Manufacturer,
@@ -51,8 +76,11 @@ public record DeviceMatchInfo(
     string VendorDisplayName,
     string DeviceIdentifierLabel,
     string DeviceIdentifierValue,
-    bool CanCopyIdentifier);
-public record DriverPageData(DeviceMatchInfo Device, List<DriverStatusItem> Drivers, DateTimeOffset CachedAt);
+    bool CanCopyIdentifier,
+    string Sha256 = "",
+    string[]? OfficialDomains = null,
+    string VerifiedAt = "");
+public record DriverPageData(DeviceMatchInfo Device, DeviceIdentityAssessment Identity, List<DriverStatusItem> Drivers, DateTimeOffset CachedAt);
 public record ComponentStatus(ComponentState State, string Text, string Version, int ReadyCount, int TotalCount, string Error = "");
 
 public static class DeviceDisplayIdentifierExtensions
@@ -116,6 +144,66 @@ public static class DeviceIdentifierResolver
         };
     }
 
+    public static DeviceIdentityAssessment Assess(DeviceIdentity identity)
+    {
+        var candidates = new List<IdentityCandidate>
+        {
+            Candidate("serial", "Win32_BIOS", "BIOS 序列号", identity.BiosSerialNumber),
+            Candidate("serial", "Win32_ComputerSystemProduct", "产品识别号", identity.ProductIdentifyingNumber),
+            Candidate("uuid", "Win32_ComputerSystemProduct", "产品 UUID", identity.ProductUuid),
+            Candidate("serial", "Win32_BaseBoard", "主板序列号", identity.BaseBoardSerialNumber),
+            Candidate("serial", "Win32_SystemEnclosure", "机箱序列号", identity.ChassisSerialNumber),
+            Candidate("model", "Win32_ComputerSystem", "整机型号", identity.ComputerModel)
+        };
+        var conflicts = new List<string>();
+        var bios = candidates[0];
+        var product = candidates[1];
+        var board = candidates[3];
+        var chassis = candidates[4];
+        if (bios.Valid && product.Valid && !Same(bios.Value, product.Value)) conflicts.Add("BIOS 序列号与产品识别号不一致");
+        if (board.Valid && chassis.Valid && !Same(board.Value, chassis.Value)) conflicts.Add("主板序列号与机箱序列号不一致");
+
+        var identityText = string.Join(' ', new[] { identity.ComputerManufacturer, identity.ProductVendor, identity.ComputerModel, identity.ProductName, identity.BiosManufacturer });
+        var isVm = Has(identityText, "virtual", "vmware", "virtualbox", "qemu", "kvm", "hyper-v", "parallels", "xen");
+        if (isVm) conflicts.Add("当前设备为虚拟环境，固件识别码不能作为 OEM 出厂序列号");
+
+        var primaryAgreement = bios.Valid && product.Valid && Same(bios.Value, product.Value);
+        var primaryAvailable = bios.Valid || product.Valid;
+        var confidence = isVm || conflicts.Count > 0
+            ? IdentityConfidence.Low
+            : primaryAgreement
+                ? IdentityConfidence.High
+                : primaryAvailable || candidates.Any(x => x.Kind == "uuid" && x.Valid)
+                    ? IdentityConfidence.Medium
+                    : IdentityConfidence.Low;
+        var summary = confidence switch
+        {
+            IdentityConfidence.High => "固件中的主要识别字段一致",
+            IdentityConfidence.Medium => "仅有单一有效识别来源，建议在厂商官网再次确认",
+            _ => conflicts.Count > 0 ? string.Join("；", conflicts) : "缺少可信的 OEM 识别字段"
+        };
+        var digestSource = string.Join('|', new[] { identity.ComputerManufacturer, identity.ComputerModel, identity.ProductUuid, identity.BiosSerialNumber }.Select(Clean).Select(x => x.ToUpperInvariant()));
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(digestSource)))[..16];
+        return new DeviceIdentityAssessment(confidence, summary, candidates, conflicts, isVm, digest);
+    }
+
+    public static string Mask(string? value)
+    {
+        var text = Clean(value);
+        if (!IsValidHardwareValue(text)) return "未能读取";
+        if (text.Length <= 4) return new string('•', text.Length);
+        return $"{text[..2]}{new string('•', Math.Min(8, text.Length - 4))}{text[^2..]}";
+    }
+
+    private static IdentityCandidate Candidate(string kind, string source, string label, string value)
+    {
+        var clean = Clean(value);
+        var valid = IsValidHardwareValue(clean);
+        return new IdentityCandidate(kind, source, label, clean, valid ? Mask(clean) : "未能读取", valid, valid ? "固件报告值" : "空值或 OEM 占位值");
+    }
+
+    private static bool Same(string left, string right) => Clean(left).Equals(Clean(right), StringComparison.OrdinalIgnoreCase);
+
     public static bool IsValidHardwareValue(string? value)
     {
         var text = Clean(value);
@@ -127,7 +215,9 @@ public static class DeviceIdentifierResolver
             "system product name", "system manufacturer", "oem", "invalid", "00000000",
             "0000000000", "0123456789", "123456789"
         };
-        return !invalid.Contains(text);
+        if (invalid.Contains(text)) return false;
+        var compact = text.Replace("-", "").Replace("{", "").Replace("}", "");
+        return compact.Any(ch => ch != '0' && ch != 'F');
     }
 
     public static string Clean(string? value) => string.IsNullOrWhiteSpace(value) ? "" : value.Trim();
@@ -472,6 +562,13 @@ public sealed class OptimizerService
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
     private int _installing;
     private string _installMessage = "";
+    private static IReadOnlyDictionary<string, OptimizationContract>? _contracts;
+    private static HashSet<string>? _disabledTaskCache;
+    private static DateTimeOffset _disabledTaskCacheAt;
+    private static readonly object LiveStateSync = new();
+    private static Dictionary<string, OptimizationStateInfo>? _liveStateCache;
+    private static DateTimeOffset _liveStateCacheAt;
+    private static Task<Dictionary<string, OptimizationStateInfo>>? _liveStateScan;
 
     public bool IsInstalling => _installing == 1;
 
@@ -483,6 +580,20 @@ public sealed class OptimizerService
             .Select((e, index) => new OptimizerItem(e.S("id"), e.S("title"), e.S("description"), e.S("tab"), e.S("group", "其他"), e.S("risk", "normal"), e.S("yamlFile"), e.B("sigRequired", true), e.S("icon", "•"), e.S("windows", "All"), e.S("category"), e.B("defaultChecked"), e.B("enabledByDefault"), index))
             .Where(x => !string.IsNullOrWhiteSpace(x.Id) && !string.IsNullOrWhiteSpace(x.YamlFile))
             .ToList();
+    }
+
+    public IReadOnlyDictionary<string, OptimizationContract> GetContracts()
+    {
+        if (_contracts != null) return _contracts;
+        using var doc = JsonUtil.ReadDocument(AppPaths.DataFile("optimization-contracts.json"));
+        var result = new Dictionary<string, OptimizationContract>(StringComparer.OrdinalIgnoreCase);
+        if (doc.RootElement.TryGetProperty("contracts", out var contracts))
+        {
+            foreach (var property in contracts.EnumerateObject())
+                result[property.Name] = new OptimizationContract(property.Name, property.Value.S("yamlSha256"), property.Value.S("sigSha256"));
+        }
+        _contracts = result;
+        return result;
     }
 
     public async Task<ComponentStatus> GetComponentStatusAsync()
@@ -499,6 +610,387 @@ public sealed class OptimizerService
         await Task.Yield();
         return ReadMutableState().Applied.TryGetValue(id, out var entry) && entry.AppliedAt != null;
     }
+
+    public async Task<Dictionary<string, OptimizationStateInfo>> GetLiveStatesAsync(IEnumerable<OptimizerItem>? source = null, bool forceRefresh = false)
+    {
+        var items = source?.ToList() ?? await GetItemsAsync();
+        var ids = items.Select(x => x.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Task<Dictionary<string, OptimizationStateInfo>> scanTask;
+        lock (LiveStateSync)
+        {
+            if (!forceRefresh && _liveStateCache != null && ids.All(_liveStateCache.ContainsKey))
+                return FilterLiveStates(_liveStateCache, ids);
+            _liveStateScan ??= Task.Run(() => ScanLiveStates(items));
+            scanTask = _liveStateScan;
+        }
+
+        Dictionary<string, OptimizationStateInfo> scanned;
+        try { scanned = await scanTask; }
+        finally
+        {
+            lock (LiveStateSync)
+            {
+                if (ReferenceEquals(_liveStateScan, scanTask)) _liveStateScan = null;
+            }
+        }
+        lock (LiveStateSync)
+        {
+            _liveStateCache ??= new Dictionary<string, OptimizationStateInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in scanned) _liveStateCache[pair.Key] = pair.Value;
+            _liveStateCacheAt = DateTimeOffset.Now;
+            return FilterLiveStates(_liveStateCache, ids);
+        }
+    }
+
+    public bool TryGetLiveStateCache(IEnumerable<OptimizerItem> source, out Dictionary<string, OptimizationStateInfo> states, out bool stale)
+    {
+        var ids = source.Select(x => x.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        lock (LiveStateSync)
+        {
+            if (_liveStateCache == null || !ids.All(_liveStateCache.ContainsKey))
+            {
+                states = new Dictionary<string, OptimizationStateInfo>(StringComparer.OrdinalIgnoreCase);
+                stale = true;
+                return false;
+            }
+            states = FilterLiveStates(_liveStateCache, ids);
+            stale = DateTimeOffset.Now - _liveStateCacheAt >= TimeSpan.FromMinutes(5);
+            return true;
+        }
+    }
+
+    private static Dictionary<string, OptimizationStateInfo> ScanLiveStates(List<OptimizerItem> items)
+    {
+        var disabledTasks = QueryDisabledTasks();
+        var result = new Dictionary<string, OptimizationStateInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in items) result[item.Id] = EvaluateLiveState(item, disabledTasks);
+        return result;
+    }
+
+    private static Dictionary<string, OptimizationStateInfo> FilterLiveStates(Dictionary<string, OptimizationStateInfo> source, HashSet<string> ids) =>
+        source.Where(x => ids.Contains(x.Key)).ToDictionary(x => x.Key, x => x.Value, StringComparer.OrdinalIgnoreCase);
+
+    public void InvalidateLiveStateCache()
+    {
+        lock (LiveStateSync)
+        {
+            _disabledTaskCache = null;
+            _disabledTaskCacheAt = default;
+            _liveStateCache = null;
+            _liveStateCacheAt = default;
+        }
+    }
+
+    public async Task<RestorePlan> BuildRestorePlanAsync(IEnumerable<string>? selectedIds = null)
+    {
+        var items = await GetItemsAsync();
+        var selected = selectedIds?.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (selected != null) items = items.Where(x => selected.Contains(x.Id)).ToList();
+        var states = await GetLiveStatesAsync(items, forceRefresh: true);
+        var plan = items.Select(item =>
+        {
+            var state = states[item.Id];
+            var willChange = state.State is OptimizationLiveState.Optimized or OptimizationLiveState.Mixed or OptimizationLiveState.RestartRequired;
+            return new RestorePlanItem(item.Id, item.Title, state.State, state.Detail, willChange, state.State == OptimizationLiveState.RestartRequired);
+        }).ToList();
+        var legacy = selected == null && (ReadMutableState().Applied.ContainsKey("DisableWindowsDefenderModern") || HasLegacyDefenderChanges());
+        if (legacy) plan.Insert(0, new RestorePlanItem("LegacyDefenderRepair", "修复旧版 Defender 设置", OptimizationLiveState.Mixed, "检测到旧版本曾执行 Defender 禁用；仅提供一次性恢复。", true, true));
+        return new RestorePlan(plan, DateTimeOffset.Now);
+    }
+
+    public async Task<RestoreExecutionReport> RestoreDefaultsAsync(RestorePlan plan)
+    {
+        var items = await GetItemsAsync();
+        var lookup = items.ToDictionary(x => x.Id, StringComparer.OrdinalIgnoreCase);
+        Directory.CreateDirectory(AppPaths.BackupRoot);
+        var emergency = new Dictionary<string, Snapshot>();
+        foreach (var entry in plan.Items.Where(x => x.WillChange && lookup.ContainsKey(x.Id))) emergency[entry.Id] = CaptureSnapshot(lookup[entry.Id]);
+        var emergencyPath = Path.Combine(AppPaths.BackupRoot, $"default-restore-snapshot-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+        AtomicFile.Write(emergencyPath, JsonSerializer.Serialize(new { schemaVersion = 2, capturedAt = DateTimeOffset.Now, snapshots = emergency }, JsonOptions));
+
+        var results = new List<RestoreItemResult>();
+        foreach (var entry in plan.Items)
+        {
+            if (entry.Id == "LegacyDefenderRepair")
+            {
+                results.Add(await RepairLegacyDefenderAsync());
+                continue;
+            }
+            if (!lookup.TryGetValue(entry.Id, out var item)) { results.Add(new RestoreItemResult(entry.Id, entry.Title, RestoreItemStatus.Skipped, "项目已不在当前优化目录中。")); continue; }
+            if (!entry.WillChange) { results.Add(new RestoreItemResult(entry.Id, entry.Title, RestoreItemStatus.AlreadyDefault, "当前已处于安全默认基线。")); continue; }
+            var actionResults = await Task.Run(() => RestoreBaseline(item));
+            InvalidateLiveStateCache();
+            var verified = (await GetLiveStatesAsync(new[] { item }))[item.Id];
+            var failed = actionResults.Where(x => !x.Ok).ToList();
+            var status = verified.State == OptimizationLiveState.Default && failed.Count == 0 ? RestoreItemStatus.Restored : failed.Count == actionResults.Count && failed.Count > 0 ? RestoreItemStatus.Failed : RestoreItemStatus.Partial;
+            var detail = status == RestoreItemStatus.Restored ? "已恢复并通过实时验证。" : string.Join("；", failed.Take(4).Select(x => $"{x.Target}: {x.Message}"));
+            results.Add(new RestoreItemResult(item.Id, item.Title, status, detail));
+        }
+        var reportPath = Path.Combine(AppPaths.ReportRoot, $"default-restore-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+        Directory.CreateDirectory(AppPaths.ReportRoot);
+        AtomicFile.Write(reportPath, JsonSerializer.Serialize(new { schemaVersion = 2, completedAt = DateTimeOffset.Now, results }, JsonOptions));
+        LogService.Write($"安全默认恢复完成：{results.Count} 项，报告 {reportPath}");
+        return new RestoreExecutionReport(results, DateTimeOffset.Now, reportPath);
+    }
+
+    private static OptimizationStateInfo EvaluateLiveState(OptimizerItem item, HashSet<string> disabledTasks)
+    {
+        if (!SupportsCurrentWindows(item.Windows)) return new OptimizationStateInfo(item.Id, OptimizationLiveState.Unsupported, "当前 Windows 版本不适用。", 0, 0);
+        var yaml = Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile);
+        if (!File.Exists(yaml)) return new OptimizationStateInfo(item.Id, OptimizationLiveState.Unknown, "优化契约尚未下载，无法安全判断。", 0, 0);
+        var targets = ExtractSnapshotTargets(yaml);
+        var details = new List<OptimizationTargetInfo>();
+        foreach (var desired in targets.RegistryDesired)
+        {
+            var target = $"{desired.Hive}\\{desired.Path}\\{desired.Name}";
+            try
+            {
+                using var key = OpenKey(desired.Hive, desired.Path, false);
+                var current = key?.GetValue(desired.Name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+                var exists = current != null;
+                if (desired.Delete)
+                    details.Add(new OptimizationTargetInfo("注册表", target, exists ? OptimizationTargetState.Default : OptimizationTargetState.Optimized, exists ? "目标值仍存在，当前未应用删除优化。" : "目标值不存在，符合优化状态。"));
+                else if (exists && RegistryMatches(current!, desired))
+                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Optimized, "当前值与优化契约一致。"));
+                else if (!exists)
+                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Default, "工具写入值不存在，处于未配置状态。"));
+                else
+                    details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Diverged, "当前值既不匹配优化值，也不是未配置状态。"));
+            }
+            catch (Exception ex) { details.Add(new OptimizationTargetInfo("注册表", target, OptimizationTargetState.Unknown, ex.Message)); }
+        }
+        foreach (var desired in targets.ServiceDesired)
+        {
+            if (desired.Mode is "enable" or "start") continue;
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{desired.Name}", false);
+                if (key == null) { details.Add(new OptimizationTargetInfo("服务", desired.Name, OptimizationTargetState.Unavailable, "当前系统未安装该服务。")); continue; }
+                var start = Convert.ToInt32(key.GetValue("Start", -1));
+                var optimizedStart = desired.Mode == "disable" ? 4 : 3;
+                var state = start == optimizedStart ? OptimizationTargetState.Optimized : start == DefaultServiceStart(desired.Name) ? OptimizationTargetState.Default : OptimizationTargetState.Diverged;
+                details.Add(new OptimizationTargetInfo("服务", desired.Name, state, $"当前启动类型值：{start}。"));
+            }
+            catch (Exception ex) { details.Add(new OptimizationTargetInfo("服务", desired.Name, OptimizationTargetState.Unknown, ex.Message)); }
+        }
+        foreach (var command in targets.Commands)
+        {
+            if (TryTaskName(command, out var task))
+            {
+                var disabled = disabledTasks.Contains(NormalizeTask(task));
+                details.Add(new OptimizationTargetInfo("计划任务", task, disabled ? OptimizationTargetState.Optimized : OptimizationTargetState.Default, disabled ? "计划任务已禁用。" : "计划任务处于启用状态。"));
+            }
+            else if (command.Contains("fsutil", StringComparison.OrdinalIgnoreCase) && command.Contains("disablelastaccess", StringComparison.OrdinalIgnoreCase))
+            {
+                var query = RunSystemCommand("fsutil.exe", "behavior query disablelastaccess");
+                var match = Regex.Match(query.Output, @"=\s*(\d+)");
+                var value = match.Success ? match.Groups[1].Value : "未知";
+                var state = !query.Ok || !match.Success ? OptimizationTargetState.Unknown : value == "1" ? OptimizationTargetState.Optimized : value is "2" or "3" ? OptimizationTargetState.Default : OptimizationTargetState.Diverged;
+                details.Add(new OptimizationTargetInfo("系统命令", "fsutil disablelastaccess", state, $"当前查询值：{value}。"));
+            }
+            else if (command.Contains("icacls", StringComparison.OrdinalIgnoreCase) && TryQuotedPath(command, out var path))
+            {
+                var acl = RunSystemCommand("icacls.exe", $"\"{Environment.ExpandEnvironmentVariables(path)}\"");
+                var denied = acl.Output.Contains("SYSTEM:(DENY)", StringComparison.OrdinalIgnoreCase);
+                var state = !acl.Ok ? OptimizationTargetState.Unknown : denied ? OptimizationTargetState.Optimized : OptimizationTargetState.Default;
+                details.Add(new OptimizationTargetInfo("ACL", path, state, !acl.Ok ? "无法读取当前访问控制列表。" : denied ? "检测到 SYSTEM 拒绝规则。" : "未检测到工具设置的拒绝规则。"));
+            }
+            else details.Add(new OptimizationTargetInfo("命令", command, OptimizationTargetState.Unknown, "没有声明可验证的状态读取器。"));
+        }
+        var total = details.Count;
+        var optimized = details.Count(x => x.State == OptimizationTargetState.Optimized);
+        var defaults = details.Count(x => x.State == OptimizationTargetState.Default);
+        var unresolved = total - optimized - defaults;
+        if (total == 0) return new OptimizationStateInfo(item.Id, OptimizationLiveState.Unknown, "没有可验证目标。", 0, 0, details);
+        var aggregate = AggregateTargetStates(details.Select(x => x.State));
+        var detail = aggregate switch
+        {
+            OptimizationLiveState.ExternallyManaged => "部分目标由外部策略管理。",
+            OptimizationLiveState.Optimized => "所有目标均处于优化状态。",
+            OptimizationLiveState.Mixed => $"{optimized}/{total} 已优化，{defaults} 项为默认状态，{unresolved} 项无法确认。",
+            OptimizationLiveState.Default => "当前符合安全默认基线。",
+            _ => $"0/{total} 已优化，{defaults} 项为默认状态，{unresolved} 项无法确认。"
+        };
+        return new OptimizationStateInfo(item.Id, aggregate, detail, optimized, total, details);
+    }
+
+    private static OptimizationLiveState AggregateTargetStates(IEnumerable<OptimizationTargetState> source)
+    {
+        var states = source.ToList();
+        if (states.Count == 0) return OptimizationLiveState.Unknown;
+        if (states.Any(x => x == OptimizationTargetState.ExternallyManaged)) return OptimizationLiveState.ExternallyManaged;
+        var optimized = states.Count(x => x == OptimizationTargetState.Optimized);
+        if (optimized == states.Count) return OptimizationLiveState.Optimized;
+        if (optimized > 0) return OptimizationLiveState.Mixed;
+        return states.All(x => x == OptimizationTargetState.Default) ? OptimizationLiveState.Default : OptimizationLiveState.Unknown;
+    }
+
+    private static List<RestoreResult> RestoreBaseline(OptimizerItem item)
+    {
+        var targets = ExtractSnapshotTargets(Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile));
+        var results = new List<RestoreResult>();
+        foreach (var desired in targets.RegistryDesired)
+        {
+            try
+            {
+                if (desired.Delete) { results.Add(new RestoreResult("registry", $"{desired.Hive}\\{desired.Path}\\{desired.Name}", false, "优化曾删除原值，安全基线无法推导其内容；请使用精确快照回退。")); continue; }
+                using var key = OpenKey(desired.Hive, desired.Path, true);
+                key?.DeleteValue(desired.Name, false);
+                results.Add(new RestoreResult("registry", $"{desired.Hive}\\{desired.Path}\\{desired.Name}", true, "已移除工具写入值，恢复为未配置。"));
+            }
+            catch (Exception ex) { results.Add(new RestoreResult("registry", desired.Name, false, ex.Message)); }
+        }
+        foreach (var desired in targets.ServiceDesired.Where(x => x.Mode is "disable" or "demand"))
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{desired.Name}", true);
+                if (key == null) { results.Add(new RestoreResult("service", desired.Name, true, "服务未安装，已跳过。")); continue; }
+                key.SetValue("Start", DefaultServiceStart(desired.Name), RegistryValueKind.DWord);
+                results.Add(new RestoreResult("service", desired.Name, true, "已恢复安全启动基线。"));
+            }
+            catch (Exception ex) { results.Add(new RestoreResult("service", desired.Name, false, ex.Message)); }
+        }
+        foreach (var command in targets.Commands)
+        {
+            if (TryTaskName(command, out var task))
+            {
+                var r = RunSystemCommand("schtasks.exe", $"/change /tn \"{task}\" /enable");
+                results.Add(new RestoreResult("task", task, r.Ok || r.Output.Contains("cannot find", StringComparison.OrdinalIgnoreCase), r.Output));
+            }
+            else if (command.Contains("fsutil", StringComparison.OrdinalIgnoreCase) && command.Contains("disablelastaccess", StringComparison.OrdinalIgnoreCase))
+            {
+                var r = RunSystemCommand("fsutil.exe", "behavior set disablelastaccess 2");
+                results.Add(new RestoreResult("command", "NTFS Last Access", r.Ok, r.Output));
+            }
+            else if (command.Contains("icacls", StringComparison.OrdinalIgnoreCase) && TryQuotedPath(command, out var path))
+            {
+                var r = RunSystemCommand("icacls.exe", $"\"{Environment.ExpandEnvironmentVariables(path)}\" /remove:d SYSTEM");
+                results.Add(new RestoreResult("acl", path, r.Ok, r.Output));
+            }
+            else results.Add(new RestoreResult("command", command, false, "没有安全的默认恢复处理器。"));
+        }
+        return results;
+    }
+
+    private static async Task<RestoreItemResult> RepairLegacyDefenderAsync()
+    {
+        var state = ReadMutableState();
+        RestoreReport report;
+        if (state.Applied.TryGetValue("DisableWindowsDefenderModern", out var legacy) && legacy.Snapshot != null)
+            report = RestoreSnapshot(legacy.Snapshot);
+        else
+            report = RepairDefenderBaseline();
+        if (report.Ok)
+        {
+            state.Applied.Remove("DisableWindowsDefenderModern");
+            WriteState(state);
+        }
+        await Task.Yield();
+        return new RestoreItemResult("LegacyDefenderRepair", "修复旧版 Defender 设置", report.Ok ? RestoreItemStatus.RestartRequired : RestoreItemStatus.Partial, report.Ok ? "已恢复旧快照，重启后生效。" : "部分设置未恢复，请查看报告。 ");
+    }
+
+    private static bool HasLegacyDefenderChanges()
+    {
+        using var policy = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Policies\Microsoft\Windows Defender", false);
+        if (new[] { "DisableAntiVirus", "DisableAntiSpyware", "DisableRealtimeMonitoring", "ServiceKeepAlive" }.Any(name => policy?.GetValue(name) != null)) return true;
+        using var realtime = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection", false);
+        if (realtime?.GetValueNames().Any(name => name.StartsWith("Disable", StringComparison.OrdinalIgnoreCase)) == true) return true;
+        foreach (var service in new[] { "WinDefend", "SecurityHealthService" })
+        {
+            using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{service}", false);
+            if (Convert.ToInt32(key?.GetValue("Start", -1)) == 4) return true;
+        }
+        return false;
+    }
+
+    private static RestoreReport RepairDefenderBaseline()
+    {
+        var domain = RunSystemCommand("powershell.exe", "-NoProfile -Command \"(Get-CimInstance Win32_ComputerSystem).PartOfDomain\"");
+        if (domain.Ok && domain.Output.Trim().Equals("True", StringComparison.OrdinalIgnoreCase))
+            return new RestoreReport(false, new List<RestoreResult> { new("policy", "Windows Defender", false, "设备已加入域，已阻止覆盖组织策略。") });
+        var results = new List<RestoreResult>();
+        void RemoveValues(string path, params string[] names)
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(path, true);
+                foreach (var name in names) key?.DeleteValue(name, false);
+                results.Add(new RestoreResult("registry", $"HKLM\\{path}", true, "已恢复为未配置。"));
+            }
+            catch (Exception ex) { results.Add(new RestoreResult("registry", path, false, ex.Message)); }
+        }
+        RemoveValues(@"SOFTWARE\Policies\Microsoft\Windows Defender", "DisableAntiVirus", "DisableSpecialRunningModes", "DisableRoutinelyTakingAction", "ServiceKeepAlive", "PUAProtection", "DisableAntiSpyware", "DisableRealtimeMonitoring");
+        RemoveValues(@"SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection", "DisableBehaviorMonitoring", "DisableIOAVProtection", "DisableOnAccessProtection", "DisableRealtimeMonitoring", "DisableRoutinelyTakingAction", "DisableScanOnRealtimeEnable");
+        foreach (var pair in new[] { ("WinDefend", 2), ("SecurityHealthService", 3), ("WdNisSvc", 3), ("SgrmBroker", 2) })
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{pair.Item1}", true);
+                if (key != null) key.SetValue("Start", pair.Item2, RegistryValueKind.DWord);
+                results.Add(new RestoreResult("service", pair.Item1, true, key == null ? "服务不存在，已跳过。" : "已恢复启动基线。"));
+            }
+            catch (Exception ex) { results.Add(new RestoreResult("service", pair.Item1, false, ex.Message)); }
+        }
+        foreach (var task in new[] { @"\Microsoft\Windows\Windows Defender\Windows Defender Cache Maintenance", @"\Microsoft\Windows\Windows Defender\Windows Defender Cleanup", @"\Microsoft\Windows\Windows Defender\Windows Defender Scheduled Scan", @"\Microsoft\Windows\Windows Defender\Windows Defender Verification" })
+        {
+            var enabled = RunSystemCommand("schtasks.exe", $"/change /tn \"{task}\" /enable");
+            results.Add(new RestoreResult("task", task, enabled.Ok || enabled.Output.Contains("cannot find", StringComparison.OrdinalIgnoreCase), enabled.Output));
+        }
+        return new RestoreReport(results.All(x => x.Ok), results);
+    }
+
+    private static bool RegistryMatches(object current, RegistryDesired desired)
+    {
+        var expected = desired.Value.Trim().Trim('"', '\'');
+        if (desired.Kind.Equals("DWord", StringComparison.OrdinalIgnoreCase) && long.TryParse(expected, out var number))
+        {
+            var actual = Convert.ToInt64(current);
+            if (number == uint.MaxValue && actual == -1) return true;
+            return actual == number;
+        }
+        return current.ToString()?.Equals(expected, StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static bool SupportsCurrentWindows(string windows)
+    {
+        if (windows.Equals("All", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(windows)) return true;
+        var is11 = Environment.OSVersion.Version.Build >= 22000;
+        return is11 ? windows.Contains("11") : windows.Contains("10");
+    }
+
+    private static readonly Dictionary<string, int> ServiceDefaultStarts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["SysMain"] = 2, ["DiagTrack"] = 2, ["diagsvc"] = 3, ["dmwappushservice"] = 3,
+        ["WSearch"] = 2, ["WerSvc"] = 3, ["PcaSvc"] = 3, ["Spooler"] = 2,
+        ["wuauserv"] = 3, ["UsoSvc"] = 2, ["DoSvc"] = 2, ["BITS"] = 3,
+        ["RemoteRegistry"] = 4, ["NvTelemetryContainer"] = 3
+    };
+
+    private static int DefaultServiceStart(string name) => ServiceDefaultStarts.TryGetValue(name, out var start) ? start : 3;
+
+    private static HashSet<string> QueryDisabledTasks()
+    {
+        if (_disabledTaskCache != null && DateTimeOffset.Now - _disabledTaskCacheAt < TimeSpan.FromSeconds(30))
+            return new HashSet<string>(_disabledTaskCache, StringComparer.OrdinalIgnoreCase);
+        var script = "Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { -not $_.Settings.Enabled } | ForEach-Object { $_.TaskPath + $_.TaskName } | ConvertTo-Json -Compress";
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        var result = RunSystemCommand("powershell.exe", $"-NoProfile -EncodedCommand {encoded}", 20000);
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!result.Ok || string.IsNullOrWhiteSpace(result.Output)) return set;
+        try
+        {
+            using var doc = JsonDocument.Parse(result.Output);
+            if (doc.RootElement.ValueKind == JsonValueKind.Array) foreach (var value in doc.RootElement.EnumerateArray()) set.Add(NormalizeTask(value.ToString()));
+            else if (doc.RootElement.ValueKind == JsonValueKind.String) set.Add(NormalizeTask(doc.RootElement.ToString()));
+        }
+        catch { }
+        _disabledTaskCache = new HashSet<string>(set, StringComparer.OrdinalIgnoreCase);
+        _disabledTaskCacheAt = DateTimeOffset.Now;
+        return set;
+    }
+
+    private static string NormalizeTask(string task) => task.Replace("\\\\", "\\").Trim().Trim('"');
 
     public async Task InstallAsync(CancellationToken token, Action<string>? status = null, bool force = false)
     {
@@ -537,9 +1029,10 @@ public sealed class OptimizerService
             {
                 var yamlPath = Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile);
                 var sigPath = Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile + ".sig");
-                if (!File.Exists(yamlPath))
+                GetContracts().TryGetValue(item.Id, out var contract);
+                if (!File.Exists(yamlPath) || contract == null || !DownloadService.Sha256(yamlPath).Equals(contract.YamlSha256, StringComparison.OrdinalIgnoreCase))
                     downloadJobs.Add((item, YamlBase + item.YamlFile, yamlPath));
-                if (item.SigRequired && !File.Exists(sigPath))
+                if (item.SigRequired && (!File.Exists(sigPath) || contract == null || !DownloadService.Sha256(sigPath).Equals(contract.SigSha256, StringComparison.OrdinalIgnoreCase)))
                     downloadJobs.Add((item, YamlBase + item.YamlFile + ".sig", sigPath));
             }
 
@@ -565,6 +1058,8 @@ public sealed class OptimizerService
                     }
                 }));
             }
+            foreach (var item in items)
+                if (!IsInstalled(item)) throw new InvalidOperationException($"{item.Title} 的优化契约或文件校验失败，已阻止使用。");
             File.WriteAllText(Path.Combine(AppPaths.OptimizerRuntime, "version.json"), JsonSerializer.Serialize(new { version = PinnedVersion, installedAt = DateTimeOffset.Now, sha256 = OptimizerHash }, JsonOptions), Encoding.UTF8);
             LogService.Write("OptimizerNXT 组件安装完成");
         }
@@ -604,6 +1099,7 @@ public sealed class OptimizerService
         }
         state.Applied[item.Id] = state.Applied[item.Id] with { AppliedAt = DateTimeOffset.Now };
         WriteState(state);
+        InvalidateLiveStateCache();
         LogService.Write($"应用优化：{item.Title}");
         return "优化已执行，可再次点击该项目回退。";
     }
@@ -614,6 +1110,7 @@ public sealed class OptimizerService
         if (!state.Applied.TryGetValue(id, out var entry) || entry.Snapshot == null)
             throw new InvalidOperationException("该项目没有可恢复快照，已保留当前状态。");
         var report = RestoreSnapshot(entry.Snapshot);
+        InvalidateLiveStateCache();
         if (!report.Ok)
         {
             await Task.Yield();
@@ -662,7 +1159,11 @@ public sealed class OptimizerService
     {
         var yaml = Path.Combine(AppPaths.OptimizerRuntime, item.YamlFile);
         var sig = yaml + ".sig";
-        return IsExeValid() && File.Exists(yaml) && (!item.SigRequired || File.Exists(sig));
+        var contracts = new OptimizerService().GetContracts();
+        if (!contracts.TryGetValue(item.Id, out var contract)) return false;
+        return IsExeValid() && File.Exists(yaml)
+            && DownloadService.Sha256(yaml).Equals(contract.YamlSha256, StringComparison.OrdinalIgnoreCase)
+            && (!item.SigRequired || File.Exists(sig) && DownloadService.Sha256(sig).Equals(contract.SigSha256, StringComparison.OrdinalIgnoreCase));
     }
 
     private static Snapshot CaptureSnapshot(OptimizerItem item)
@@ -672,6 +1173,12 @@ public sealed class OptimizerService
         foreach (var reg in targets.Registry) snapshot.Registry.Add(CaptureRegistry(reg.Hive, reg.Path, reg.Name));
         foreach (var service in targets.Services) snapshot.Services.Add(CaptureService(service));
         foreach (var file in targets.Files) snapshot.Files.Add(CaptureFile(file));
+        foreach (var command in targets.Commands)
+        {
+            if (TryTaskName(command, out var task)) snapshot.Tasks.Add(CaptureTask(task));
+            else if (command.Contains("icacls", StringComparison.OrdinalIgnoreCase) && TryQuotedPath(command, out var aclPath)) snapshot.Acls.Add(CaptureAcl(aclPath));
+            else snapshot.CommandStates.Add(CaptureCommand(command));
+        }
         return snapshot;
     }
 
@@ -679,7 +1186,7 @@ public sealed class OptimizerService
     {
         var targets = new SnapshotTargets();
         if (!File.Exists(yaml)) return targets;
-        string? hive = null, path = null, mode = null;
+        string? hive = null, path = null, mode = null, serviceMode = null;
         var inFiles = false;
         foreach (var raw in File.ReadLines(yaml, Encoding.UTF8))
         {
@@ -693,25 +1200,36 @@ public sealed class OptimizerService
                 if (!section.StartsWith("registr")) { hive = null; path = null; mode = null; }
             }
             var hiveMatch = Regex.Match(line, @"^(?:-\s*)?hive:\s*(HK[A-Z]+)", RegexOptions.IgnoreCase);
-            if (hiveMatch.Success) { hive = hiveMatch.Groups[1].Value.ToUpperInvariant(); path = null; mode = null; inFiles = false; continue; }
+            if (hiveMatch.Success) { hive = hiveMatch.Groups[1].Value.ToUpperInvariant(); path = null; mode = null; serviceMode = null; inFiles = false; continue; }
             if (hive != null && Regex.IsMatch(line, @"^path:\s*", RegexOptions.IgnoreCase)) { path = CleanYamlScalar(Regex.Replace(line, @"^path:\s*", "", RegexOptions.IgnoreCase)); continue; }
             var modeMatch = Regex.Match(line, @"^(add|set|values|delete|remove|removevalues|deletevalues):\s*$", RegexOptions.IgnoreCase);
             if (hive != null && path != null && modeMatch.Success) { mode = modeMatch.Groups[1].Value; continue; }
             if (hive != null && path != null && mode != null)
             {
+                var typed = Regex.Match(line, "^(?:\"(?<name>[^\"]*)\"|'(?<name>[^']*)'|(?<name>[^:{}]+))\\s*:\\s*\\{\\s*type:\\s*(?<type>[^,}]+),\\s*value:\\s*(?<value>.*?)\\s*\\}\\s*$", RegexOptions.IgnoreCase);
                 var key = Regex.Match(line, "^['\"]?([^'\":{}]+)['\"]?\\s*:\\s*\\{");
-                var list = Regex.Match(line, "^-\\s*['\"]?([^'\"\\s]+)['\"]?\\s*$");
+                var list = Regex.Match(line, "^-\\s*['\"]?([^'\"]+?)['\"]?\\s*$");
                 var name = Regex.Match(line, @"^name:\s*(.+)$", RegexOptions.IgnoreCase);
-                var valueName = key.Success ? key.Groups[1].Value : list.Success ? list.Groups[1].Value : name.Success ? name.Groups[1].Value : "";
-                if (!string.IsNullOrWhiteSpace(valueName)) targets.Registry.Add(new RegistryTarget(hive, path, CleanYamlScalar(valueName)));
+                var valueName = typed.Success ? typed.Groups["name"].Value : key.Success ? key.Groups[1].Value : list.Success ? list.Groups[1].Value : name.Success ? name.Groups[1].Value : "";
+                valueName = CleanYamlScalar(valueName);
+                if (typed.Success)
+                    targets.RegistryDesired.Add(new RegistryDesired(hive, path, valueName, CleanYamlScalar(typed.Groups["type"].Value), CleanYamlScalar(typed.Groups["value"].Value), false));
+                else if (!string.IsNullOrWhiteSpace(valueName) && Regex.IsMatch(mode, "delete|remove", RegexOptions.IgnoreCase))
+                    targets.RegistryDesired.Add(new RegistryDesired(hive, path, valueName, "", "", true));
+                if (typed.Success || !string.IsNullOrWhiteSpace(valueName)) targets.Registry.Add(new RegistryTarget(hive, path, valueName));
             }
-            if (Regex.IsMatch(line, @"^(stop|disable|enable|demand|start|services):\s*$", RegexOptions.IgnoreCase)) { mode = "service"; continue; }
+            var serviceHeader = Regex.Match(line, @"^(stop|disable|enable|demand|start|services):\s*$", RegexOptions.IgnoreCase);
+            if (serviceHeader.Success) { mode = "service"; serviceMode = serviceHeader.Groups[1].Value.ToLowerInvariant(); hive = null; path = null; continue; }
             if (mode == "service")
             {
                 var service = Regex.Match(line, @"^(?:-\s*)?name:\s*([A-Za-z0-9_.-]+)$", RegexOptions.IgnoreCase);
                 var simple = Regex.Match(line, @"^-\s*([A-Za-z0-9_.-]+)\s*$");
                 var serviceName = service.Success ? service.Groups[1].Value : simple.Success ? simple.Groups[1].Value : "";
-                if (!string.IsNullOrWhiteSpace(serviceName)) targets.Services.Add(serviceName);
+                if (!string.IsNullOrWhiteSpace(serviceName))
+                {
+                    targets.Services.Add(serviceName);
+                    if (serviceMode is "disable" or "enable" or "demand" or "start") targets.ServiceDesired.Add(new ServiceDesired(serviceName, serviceMode));
+                }
             }
             if (Regex.IsMatch(line, @"^(files?|filesystem|deletefiles|removefiles|folders|directories):\s*$", RegexOptions.IgnoreCase)) { inFiles = true; continue; }
             if (inFiles)
@@ -722,11 +1240,13 @@ public sealed class OptimizerService
                 filePath = CleanYamlScalar(filePath);
                 if (!string.IsNullOrWhiteSpace(filePath) && (filePath.Contains('\\') || filePath.Contains('/') || filePath.Contains('%'))) targets.Files.Add(filePath);
             }
-            if (Regex.IsMatch(line, @"-\s*.*\b(bcdedit|powercfg|netsh|schtasks)\b", RegexOptions.IgnoreCase))
+            if (Regex.IsMatch(line, @"^-\s*.*\b(bcdedit|powercfg|netsh|schtasks(?:\.exe)?|fsutil|icacls)\b", RegexOptions.IgnoreCase))
                 targets.Commands.Add(line.TrimStart('-', ' '));
         }
         targets.Registry = targets.Registry.DistinctBy(x => $"{x.Hive}\\{x.Path}\\{x.Name}".ToLowerInvariant()).ToList();
         targets.Services = targets.Services.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        targets.RegistryDesired = targets.RegistryDesired.DistinctBy(x => $"{x.Hive}\\{x.Path}\\{x.Name}".ToLowerInvariant()).ToList();
+        targets.ServiceDesired = targets.ServiceDesired.GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase).Select(g => g.Last()).ToList();
         targets.Files = targets.Files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         targets.Commands = targets.Commands.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         return targets;
@@ -761,7 +1281,63 @@ public sealed class OptimizerService
     private static ServiceSnapshot CaptureService(string name)
     {
         using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{name}", false);
-        return new ServiceSnapshot(name, key != null, key?.GetValue("Start")?.ToString());
+        var query = RunSystemCommand("sc.exe", $"query \"{name}\"");
+        return new ServiceSnapshot(name, key != null, key?.GetValue("Start")?.ToString(), key?.GetValue("DelayedAutoStart")?.ToString(), query.Ok && query.Output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static TaskSnapshot CaptureTask(string name)
+    {
+        var result = RunSystemCommand("schtasks.exe", $"/query /tn \"{name}\" /xml");
+        return new TaskSnapshot(name, result.Ok, result.Ok && !result.Output.Contains("<Enabled>false</Enabled>", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static AclSnapshot CaptureAcl(string path)
+    {
+        var expanded = Environment.ExpandEnvironmentVariables(path);
+        if (!Directory.Exists(expanded) && !File.Exists(expanded)) return new AclSnapshot(expanded, false, "");
+        var escaped = expanded.Replace("'", "''");
+        var result = RunSystemCommand("powershell.exe", $"-NoProfile -Command \"(Get-Acl -LiteralPath '{escaped}').Sddl\"");
+        return new AclSnapshot(expanded, result.Ok, result.Ok ? result.Output.Trim() : "");
+    }
+
+    private static CommandSnapshot CaptureCommand(string command)
+    {
+        if (command.Contains("fsutil", StringComparison.OrdinalIgnoreCase) && command.Contains("disablelastaccess", StringComparison.OrdinalIgnoreCase))
+        {
+            var result = RunSystemCommand("fsutil.exe", "behavior query disablelastaccess");
+            var match = Regex.Match(result.Output, @"=\s*(\d+)");
+            return new CommandSnapshot(command, "fsutil-disablelastaccess", match.Success ? match.Groups[1].Value : "", result.Ok && match.Success);
+        }
+        return new CommandSnapshot(command, "unsupported", "", false);
+    }
+
+    private static bool TryTaskName(string command, out string name)
+    {
+        var match = Regex.Match(command, "(?i)/tn\\s+(?:\"(?<name>[^\"]+)\"|'(?<name>[^']+)'|(?<name>\\S+))");
+        name = match.Success ? match.Groups["name"].Value : "";
+        return match.Success && command.Contains("schtasks", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryQuotedPath(string command, out string path)
+    {
+        var match = Regex.Match(command, "\"(?<path>[^\"]+)\"");
+        path = match.Success ? match.Groups["path"].Value : "";
+        return match.Success;
+    }
+
+    private static (bool Ok, string Output) RunSystemCommand(string file, string arguments, int timeoutMs = 12000)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(file, arguments) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            using var process = Process.Start(psi);
+            if (process == null) return (false, "无法启动进程");
+            var output = process.StandardOutput.ReadToEnd();
+            var error = process.StandardError.ReadToEnd();
+            if (!process.WaitForExit(timeoutMs)) { try { process.Kill(true); } catch { } return (false, "执行超时"); }
+            return (process.ExitCode == 0, (output + Environment.NewLine + error).Trim());
+        }
+        catch (Exception ex) { return (false, ex.Message); }
     }
 
     private static FileSnapshot CaptureFile(string pathText)
@@ -796,10 +1372,31 @@ public sealed class OptimizerService
             try
             {
                 using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{service.Name}", true);
-                if (key != null && service.Exists && int.TryParse(service.StartValue, out var start)) key.SetValue("Start", start, RegistryValueKind.DWord);
-                results.Add(new RestoreResult("service", service.Name, true, ""));
+                if (key != null && service.Exists && int.TryParse(service.StartValue, out var start))
+                {
+                    key.SetValue("Start", start, RegistryValueKind.DWord);
+                    if (int.TryParse(service.DelayedAutoStart, out var delayed)) key.SetValue("DelayedAutoStart", delayed, RegistryValueKind.DWord);
+                    else key.DeleteValue("DelayedAutoStart", false);
+                    var runtime = RunSystemCommand("sc.exe", $"{(service.WasRunning ? "start" : "stop")} \"{service.Name}\"");
+                    results.Add(new RestoreResult("service", service.Name, runtime.Ok || runtime.Output.Contains("already", StringComparison.OrdinalIgnoreCase), runtime.Ok ? "" : runtime.Output));
+                }
+                else results.Add(new RestoreResult("service", service.Name, !service.Exists, service.Exists ? "服务不存在，无法恢复" : "执行前不存在，无需恢复"));
             }
             catch (Exception ex) { results.Add(new RestoreResult("service", service.Name, false, ex.Message)); }
+        }
+        foreach (var task in snapshot.Tasks)
+        {
+            if (!task.Exists) { results.Add(new RestoreResult("task", task.Name, true, "执行前不存在，无需恢复")); continue; }
+            var result = RunSystemCommand("schtasks.exe", $"/change /tn \"{task.Name}\" /{(task.Enabled ? "enable" : "disable")}");
+            results.Add(new RestoreResult("task", task.Name, result.Ok, result.Output));
+        }
+        foreach (var acl in snapshot.Acls)
+        {
+            if (!acl.Exists || string.IsNullOrWhiteSpace(acl.Sddl)) { results.Add(new RestoreResult("acl", acl.Path, true, "执行前不存在，无需恢复")); continue; }
+            var path = acl.Path.Replace("'", "''");
+            var sddl = acl.Sddl.Replace("'", "''");
+            var result = RunSystemCommand("powershell.exe", $"-NoProfile -Command \"$a=Get-Acl -LiteralPath '{path}';$a.SetSecurityDescriptorSddlForm('{sddl}');Set-Acl -LiteralPath '{path}' -AclObject $a\"");
+            results.Add(new RestoreResult("acl", acl.Path, result.Ok, result.Output));
         }
         foreach (var file in snapshot.Files)
         {
@@ -821,8 +1418,16 @@ public sealed class OptimizerService
             }
             catch (Exception ex) { results.Add(new RestoreResult("file", file.ExpandedPath, false, ex.Message)); }
         }
-        foreach (var command in snapshot.Commands)
-            results.Add(new RestoreResult("command", command, true, "命令型修改无法自动推导回退命令，已记录但未执行。"));
+        foreach (var command in snapshot.CommandStates)
+        {
+            if (!command.Supported) { results.Add(new RestoreResult("command", command.Command, false, "该命令没有安全的逆操作，已阻止报告成功。")); continue; }
+            if (command.Kind == "fsutil-disablelastaccess")
+            {
+                var result = RunSystemCommand("fsutil.exe", $"behavior set disablelastaccess {command.Value}");
+                results.Add(new RestoreResult("command", command.Command, result.Ok, result.Output));
+            }
+            else results.Add(new RestoreResult("command", command.Command, false, "未知命令状态类型"));
+        }
         return new RestoreReport(results.All(x => x.Ok), results);
     }
 
@@ -851,14 +1456,39 @@ public sealed class OptimizerService
     {
         AppPaths.Ensure();
         if (!File.Exists(AppPaths.StatePath)) return new();
-        try { return JsonSerializer.Deserialize<OptimizerState>(File.ReadAllText(AppPaths.StatePath, Encoding.UTF8), JsonOptions) ?? new(); }
-        catch { return new(); }
+        try
+        {
+            var state = JsonSerializer.Deserialize<OptimizerState>(File.ReadAllText(AppPaths.StatePath, Encoding.UTF8), JsonOptions) ?? new();
+            var expectedChecksum = state.Checksum;
+            if (!string.IsNullOrWhiteSpace(expectedChecksum))
+            {
+                state.Checksum = "";
+                var payload = JsonSerializer.Serialize(state, JsonOptions);
+                var actualChecksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
+                if (!actualChecksum.Equals(expectedChecksum, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("优化状态校验和不匹配");
+                state.Checksum = expectedChecksum;
+            }
+            state.SchemaVersion = 2;
+            state.Applied ??= new();
+            return state;
+        }
+        catch (Exception ex)
+        {
+            var quarantine = AppPaths.StatePath + $".corrupt-{DateTime.Now:yyyyMMdd-HHmmss}";
+            try { File.Move(AppPaths.StatePath, quarantine, true); } catch { }
+            LogService.Write($"优化状态文件损坏，已隔离：{quarantine} - {ex.Message}");
+            return new();
+        }
     }
 
     private static void WriteState(OptimizerState state)
     {
         AppPaths.Ensure();
-        File.WriteAllText(AppPaths.StatePath, JsonSerializer.Serialize(state, JsonOptions), Encoding.UTF8);
+        state.SchemaVersion = 2;
+        state.Checksum = "";
+        var payload = JsonSerializer.Serialize(state, JsonOptions);
+        state.Checksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
+        AtomicFile.Write(AppPaths.StatePath, JsonSerializer.Serialize(state, JsonOptions));
     }
 
     private static void BackupInputs()
@@ -1474,7 +2104,7 @@ public sealed class ToolboxService
         "runtime" => "微软运行库",
         "activation" => "Windows 激活工具",
         "disableUac" => "关闭 UAC",
-        "disableSecurityUpdate" => "关闭系统更新",
+        "disableSecurityUpdate" => "Windows 更新与安全设置工具",
         "driverToolVip" => "驱动总裁 VIP",
         "disableCoreIsolation" => "关闭内核隔离",
         "sevenZip" => "7-Zip",
@@ -1498,41 +2128,100 @@ public sealed class ToolboxService
 public sealed class DriverService
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
+    private sealed record DriverStatusCache(List<DriverStatusItem> Drivers, DateTimeOffset CachedAt);
+    private readonly object _pageCacheSync = new();
+    private DriverPageData? _pageCache;
+    private DateTimeOffset _pageCacheAt;
+    private Task<DriverPageData>? _pageRefresh;
 
     public void ClearCache()
     {
+        lock (_pageCacheSync)
+        {
+            _pageCache = null;
+            _pageCacheAt = default;
+        }
         try { if (File.Exists(AppPaths.DriverCachePath)) File.Delete(AppPaths.DriverCachePath); } catch { }
+    }
+
+    public bool TryGetPageCache(out DriverPageData? data, out bool stale)
+    {
+        lock (_pageCacheSync)
+        {
+            data = _pageCache;
+            stale = data == null || DateTimeOffset.Now - _pageCacheAt >= TimeSpan.FromMinutes(30);
+            return data != null;
+        }
     }
 
     public async Task<DriverPageData> GetPageDataAsync(bool forceRefresh = false)
     {
+        Task<DriverPageData> refreshTask;
+        lock (_pageCacheSync)
+        {
+            if (!forceRefresh && _pageCache != null && DateTimeOffset.Now - _pageCacheAt < TimeSpan.FromMinutes(30)) return _pageCache;
+            _pageRefresh ??= LoadPageDataAsync(forceRefresh);
+            refreshTask = _pageRefresh;
+        }
+        try
+        {
+            var data = await refreshTask;
+            lock (_pageCacheSync)
+            {
+                _pageCache = data;
+                _pageCacheAt = DateTimeOffset.Now;
+            }
+            return data;
+        }
+        finally
+        {
+            lock (_pageCacheSync)
+            {
+                if (ReferenceEquals(_pageRefresh, refreshTask)) _pageRefresh = null;
+            }
+        }
+    }
+
+    private async Task<DriverPageData> LoadPageDataAsync(bool forceRefresh)
+    {
         AppPaths.Ensure();
+        var detected = await DetectDetailedAsync();
+        List<DriverStatusItem>? drivers = null;
+        var cachedAt = DateTimeOffset.Now;
         if (!forceRefresh && File.Exists(AppPaths.DriverCachePath))
         {
             try
             {
-                var cached = JsonSerializer.Deserialize<DriverPageData>(File.ReadAllText(AppPaths.DriverCachePath, Encoding.UTF8), JsonOptions);
-                if (cached != null &&
-                    DateTimeOffset.Now - cached.CachedAt < TimeSpan.FromHours(12) &&
-                    !string.IsNullOrWhiteSpace(cached.Device.DeviceIdentifierLabel) &&
-                    !string.IsNullOrWhiteSpace(cached.Device.DeviceIdentifierValue))
-                    return cached;
+                var rawCache = File.ReadAllText(AppPaths.DriverCachePath, Encoding.UTF8);
+                if (rawCache.Contains("\"Device\"", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("检测到包含旧版原始机器标识的缓存，立即重建。");
+                var cached = JsonSerializer.Deserialize<DriverStatusCache>(rawCache, JsonOptions);
+                if (cached != null && DateTimeOffset.Now - cached.CachedAt < TimeSpan.FromHours(12))
+                {
+                    drivers = cached.Drivers;
+                    cachedAt = cached.CachedAt;
+                }
             }
             catch { }
         }
-
-        var data = new DriverPageData(await DetectAsync(), await GetDriverStatusAsync(), DateTimeOffset.Now);
-        File.WriteAllText(AppPaths.DriverCachePath, JsonSerializer.Serialize(data, JsonOptions), Encoding.UTF8);
-        return data;
+        if (drivers == null)
+        {
+            drivers = await GetDriverStatusAsync();
+            cachedAt = DateTimeOffset.Now;
+            AtomicFile.Write(AppPaths.DriverCachePath, JsonSerializer.Serialize(new DriverStatusCache(drivers, cachedAt), JsonOptions));
+        }
+        return new DriverPageData(detected.Info, detected.Assessment, drivers, cachedAt);
     }
 
-    public async Task<DeviceMatchInfo> DetectAsync()
+    public async Task<DeviceMatchInfo> DetectAsync() => (await DetectDetailedAsync()).Info;
+
+    private async Task<(DeviceMatchInfo Info, DeviceIdentityAssessment Assessment)> DetectDetailedAsync()
     {
         using var device = await PowerShellJsonAsync("""
 $cs = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
 $product = Get-CimInstance Win32_ComputerSystemProduct
 $board = Get-CimInstance Win32_BaseBoard
+$chassis = Get-CimInstance Win32_SystemEnclosure | Select-Object -First 1
 [PSCustomObject]@{
   BiosManufacturer=$bios.Manufacturer
   BiosSerialNumber=$bios.SerialNumber
@@ -1543,9 +2232,11 @@ $board = Get-CimInstance Win32_BaseBoard
   ProductName=$product.Name
   ProductIdentifyingNumber=$product.IdentifyingNumber
   ProductSkuNumber=$product.SKUNumber
+  ProductUuid=$product.UUID
   BaseBoardManufacturer=$board.Manufacturer
   BaseBoardProduct=$board.Product
   BaseBoardSerialNumber=$board.SerialNumber
+  ChassisSerialNumber=$chassis.SerialNumber
 } | ConvertTo-Json -Compress
 """);
         var root = device.RootElement;
@@ -1559,9 +2250,12 @@ $board = Get-CimInstance Win32_BaseBoard
             root.S("ProductName"),
             root.S("ProductIdentifyingNumber"),
             root.S("ProductSkuNumber"),
+            root.S("ProductUuid"),
             root.S("BaseBoardManufacturer"),
             root.S("BaseBoardProduct"),
-            root.S("BaseBoardSerialNumber"));
+            root.S("BaseBoardSerialNumber"),
+            root.S("ChassisSerialNumber"));
+        var assessment = DeviceIdentifierResolver.Assess(identity);
         var manufacturer = DeviceIdentifierResolver.IsValidHardwareValue(identity.ComputerManufacturer) ? DeviceIdentifierResolver.Clean(identity.ComputerManufacturer) : "未知厂商";
         var model = DeviceIdentifierResolver.IsValidHardwareValue(identity.ComputerModel) ? DeviceIdentifierResolver.Clean(identity.ComputerModel) :
             DeviceIdentifierResolver.IsValidHardwareValue(identity.ProductName) ? DeviceIdentifierResolver.Clean(identity.ProductName) : "未知型号";
@@ -1586,25 +2280,47 @@ $board = Get-CimInstance Win32_BaseBoard
                     if (keywords.Any(k => model.Contains(k, StringComparison.OrdinalIgnoreCase) || identifier.Value.Contains(k, StringComparison.OrdinalIgnoreCase)))
                     {
                         var matchedVendor = candidate.S("driverCenterName", brand.Value.S("brandName", vendorDisplay));
-                        return new DeviceMatchInfo(manufacturer, model, serial, matchedVendor, candidate.S("officialPage", queryPage), candidate.S("downloadUrl"), candidate.S("fileName"), true, matchedVendor, identifier.Label, identifier.Value, identifier.CanCopy());
+                        var domains = candidate.TryGetProperty("officialDomains", out var ds) ? ds.EnumerateArray().Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+                        var sha = candidate.S("sha256");
+                        var verifiedAt = candidate.S("verifiedAt");
+                        var directUrl = assessment.Confidence == IdentityConfidence.Low || string.IsNullOrWhiteSpace(sha) || string.IsNullOrWhiteSpace(verifiedAt) ? "" : candidate.S("downloadUrl");
+                        return (new DeviceMatchInfo(manufacturer, model, serial, matchedVendor, candidate.S("officialPage", queryPage), directUrl, candidate.S("fileName"), true, matchedVendor, identifier.Label, identifier.Value, identifier.CanCopy(), sha, domains, verifiedAt), assessment);
                     }
                 }
             }
             var brandName = brand.Value.S("brandName", vendorDisplay);
-            return new DeviceMatchInfo(manufacturer, model, serial, brandName, queryPage, "", "", true, brandName, identifier.Label, identifier.Value, identifier.CanCopy());
+            return (new DeviceMatchInfo(manufacturer, model, serial, brandName, queryPage, "", "", true, brandName, identifier.Label, identifier.Value, identifier.CanCopy()), assessment);
         }
-        return new DeviceMatchInfo(manufacturer, model, serial, "暂无信息", "", "", "", false, vendorDisplay, identifier.Label, identifier.Value, identifier.CanCopy());
+        return (new DeviceMatchInfo(manufacturer, model, serial, "暂无信息", "", "", "", false, vendorDisplay, identifier.Label, identifier.Value, identifier.CanCopy()), assessment);
     }
 
     public async Task<string> DownloadDriverPackageAsync(DeviceMatchInfo info, CancellationToken token)
     {
-        if (string.IsNullOrWhiteSpace(info.DownloadUrl)) throw new InvalidOperationException("该匹配项未提供可直接下载的驱动包。");
+        if (string.IsNullOrWhiteSpace(info.DownloadUrl)) throw new InvalidOperationException("该匹配项未提供经过校验的直接下载包，请使用厂商官网入口。");
+        if (!Uri.TryCreate(info.DownloadUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+            throw new InvalidOperationException("驱动包地址不是安全的 HTTPS 地址。");
+        var allowed = info.OfficialDomains ?? Array.Empty<string>();
+        if (allowed.Length == 0 || !allowed.Any(domain => uri.Host.Equals(domain, StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith('.' + domain, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("驱动包域名不在官方白名单中。");
+        if (string.IsNullOrWhiteSpace(info.Sha256)) throw new InvalidOperationException("驱动包缺少固定 SHA-256，已阻止直接下载。");
         Directory.CreateDirectory(AppPaths.Downloads);
-        var name = string.IsNullOrWhiteSpace(info.FileName) ? Path.GetFileName(new Uri(info.DownloadUrl).AbsolutePath) : info.FileName;
+        var name = string.IsNullOrWhiteSpace(info.FileName) ? Path.GetFileName(uri.AbsolutePath) : info.FileName;
         var target = Path.Combine(AppPaths.Downloads, name);
         using var dl = new DownloadService();
         await dl.DownloadFileAsync(info.DownloadUrl, target, token);
-        LogService.Write($"下载驱动包：{target}");
+        if (!DownloadService.Sha256(target).Equals(info.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            try { File.Delete(target); } catch { }
+            throw new InvalidOperationException("驱动包 SHA-256 校验失败，下载结果已删除。");
+        }
+        var escapedTarget = target.Replace("'", "''");
+        using var signature = await PowerShellJsonAsync($"$s=Get-AuthenticodeSignature -LiteralPath '{escapedTarget}'; [PSCustomObject]@{{ Status=$s.Status.ToString(); Subject=$s.SignerCertificate.Subject }} | ConvertTo-Json -Compress", token);
+        if (!signature.RootElement.S("Status").Equals("Valid", StringComparison.OrdinalIgnoreCase))
+        {
+            try { File.Delete(target); } catch { }
+            throw new InvalidOperationException("驱动包数字签名无效，下载结果已删除。");
+        }
+        LogService.Write($"下载并校验驱动包：{Path.GetFileName(target)}");
         return target;
     }
 
@@ -1669,7 +2385,7 @@ Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -and $_.PNPClass -in @(
         };
     }
 
-    private static async Task<JsonDocument> PowerShellJsonAsync(string script)
+    private static async Task<JsonDocument> PowerShellJsonAsync(string script, CancellationToken token = default)
     {
         var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
         var psi = new ProcessStartInfo("powershell.exe")
@@ -1685,23 +2401,56 @@ Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -and $_.PNPClass -in @(
         psi.ArgumentList.Add("-EncodedCommand");
         psi.ArgumentList.Add(encoded);
         using var process = Process.Start(psi) ?? throw new InvalidOperationException("无法启动 PowerShell。");
-        var output = await process.StandardOutput.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        return JsonDocument.Parse(string.IsNullOrWhiteSpace(output) ? "{}" : output);
+        var outputTask = process.StandardOutput.ReadToEndAsync(token);
+        var errorTask = process.StandardError.ReadToEndAsync(token);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(25));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            try { process.Kill(true); } catch { }
+            throw new TimeoutException("设备信息读取超过 25 秒，已停止本次检测。");
+        }
+        var output = await outputTask;
+        var error = await errorTask;
+        if (process.ExitCode != 0) throw new InvalidOperationException($"设备信息读取失败：{error.Trim()}");
+        if (string.IsNullOrWhiteSpace(output)) throw new InvalidOperationException("设备信息读取未返回有效数据。");
+        try { return JsonDocument.Parse(output); }
+        catch (JsonException ex) { throw new InvalidOperationException("设备信息返回格式不完整，请刷新后重试。", ex); }
+    }
+}
+
+public static class AtomicFile
+{
+    public static void Write(string path, string content)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+        var temporary = path + ".tmp";
+        File.WriteAllText(temporary, content, new UTF8Encoding(false));
+        if (File.Exists(path)) File.Move(temporary, path, true);
+        else File.Move(temporary, path);
     }
 }
 
 public sealed record ProcessResult(int ExitCode, string Output, bool Succeeded, bool TimedOut, bool HadKnownInstanceError);
 public sealed record RegistryTarget(string Hive, string Path, string Name);
+public sealed record RegistryDesired(string Hive, string Path, string Name, string Kind, string Value, bool Delete);
+public sealed record ServiceDesired(string Name, string Mode);
 public sealed class SnapshotTargets
 {
     public List<RegistryTarget> Registry { get; set; } = new();
     public List<string> Services { get; set; } = new();
     public List<string> Files { get; set; } = new();
     public List<string> Commands { get; set; } = new();
+    public List<RegistryDesired> RegistryDesired { get; set; } = new();
+    public List<ServiceDesired> ServiceDesired { get; set; } = new();
 }
 public sealed record RegistrySnapshot(string Hive, string Path, string Name, bool KeyExists, bool ValueExists, string Kind, string? StringValue, string[]? StringArray, byte[]? BinaryValue, long? IntegerValue);
-public sealed record ServiceSnapshot(string Name, bool Exists, string? StartValue);
+public sealed record ServiceSnapshot(string Name, bool Exists, string? StartValue, string? DelayedAutoStart, bool WasRunning);
+public sealed record TaskSnapshot(string Name, bool Exists, bool Enabled);
+public sealed record AclSnapshot(string Path, bool Exists, string Sddl);
+public sealed record CommandSnapshot(string Command, string Kind, string Value, bool Supported);
 public sealed record FileSnapshot(string Path, string ExpandedPath, bool Exists, string Type, string? DataBase64, string Note);
 public sealed record RestoreResult(string Type, string Target, bool Ok, string Message);
 public sealed record RestoreReport(bool Ok, List<RestoreResult> Results);
@@ -1710,8 +2459,16 @@ public sealed class Snapshot
     public DateTimeOffset CapturedAt { get; set; }
     public List<RegistrySnapshot> Registry { get; set; } = new();
     public List<ServiceSnapshot> Services { get; set; } = new();
+    public List<TaskSnapshot> Tasks { get; set; } = new();
+    public List<AclSnapshot> Acls { get; set; } = new();
+    public List<CommandSnapshot> CommandStates { get; set; } = new();
     public List<FileSnapshot> Files { get; set; } = new();
     public List<string> Commands { get; set; } = new();
 }
 public sealed record AppliedEntry(string Id, string Title, string YamlFile, Snapshot? Snapshot, DateTimeOffset? AppliedAt);
-public sealed class OptimizerState { public Dictionary<string, AppliedEntry> Applied { get; set; } = new(); }
+public sealed class OptimizerState
+{
+    public int SchemaVersion { get; set; } = 2;
+    public string Checksum { get; set; } = "";
+    public Dictionary<string, AppliedEntry> Applied { get; set; } = new();
+}

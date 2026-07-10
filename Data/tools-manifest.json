@@ -41,7 +41,7 @@
     },
     "disableSecurityUpdate": {
       "version": "local",
-      "description": "关闭 Defender 安全中心和 Windows 自动更新，请注意终结 Windows Update 组件会导致微软商店等功能异常，建议选择禁用选项！",
+      "description": "独立的 Windows 更新与安全设置工具，可修改 Windows Update、Defender 安全中心及相关服务。终止更新组件可能影响 Microsoft Store，请仅在了解后果时使用。",
       "size": 522552,
       "sha256": "89835ACC8E83DC7EFAB5B4DF6066E3B4258D37720B02262A95C02DE256A5BD7A",
       "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/disable-security-update.exe",

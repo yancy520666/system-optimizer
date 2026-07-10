@@ -304,22 +304,6 @@
     "description": "关闭 DeviceGuard 中基于虚拟化的安全功能。"
   },
   {
-    "id": "DisableWindowsDefenderModern",
-    "title": "禁用 Defender",
-    "category": "手动高级",
-    "tab": "高级选项",
-    "group": "安全相关",
-    "icon": "🛑",
-    "yamlFile": "disable-windows-security.yaml",
-    "sigRequired": true,
-    "windows": "10, 11",
-    "risk": "high",
-    "defaultChecked": false,
-    "enabledByDefault": false,
-    "statusCheck": "service",
-    "description": "关闭 Windows Security / Defender 实时保护、任务、服务、日志和右键菜单。"
-  },
-  {
     "id": "SecurityAndSmartScreen",
     "title": "SmartScreen 设置",
     "category": "手动高级",
@@ -334,38 +318,6 @@
     "enabledByDefault": false,
     "statusCheck": "registry",
     "description": "配置 SmartScreen、附件管理器、IE 钓鱼筛选、AppHost 和安全通知。"
-  },
-  {
-    "id": "DisableSystemRestore",
-    "title": "禁用系统还原",
-    "category": "手动高级",
-    "tab": "磁盘清理",
-    "group": "存储与清理",
-    "icon": "🗄️",
-    "yamlFile": "disable-system-restore.yaml",
-    "sigRequired": true,
-    "windows": "All",
-    "risk": "high",
-    "defaultChecked": false,
-    "enabledByDefault": false,
-    "statusCheck": "service",
-    "description": "关闭系统还原、删除快照，并将 VSS 设置为手动。"
-  },
-  {
-    "id": "UninstallOneDrive",
-    "title": "卸载 OneDrive",
-    "category": "手动高级",
-    "tab": "磁盘清理",
-    "group": "存储与清理",
-    "icon": "☁️",
-    "yamlFile": "uninstall-onedrive.yaml",
-    "sigRequired": true,
-    "windows": "All",
-    "risk": "high",
-    "defaultChecked": false,
-    "enabledByDefault": false,
-    "statusCheck": "app",
-    "description": "卸载 OneDrive、关闭同步并删除相关计划更新任务。"
   },
   {
     "id": "DisableModernStandby",

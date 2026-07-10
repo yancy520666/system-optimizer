@@ -58,6 +58,8 @@ public partial class MainWindow : Window
     private bool _recentVisibleHoverClosed;
     private DateTime _lastVisibleHoverClosedAt = DateTime.MinValue;
     private int _hoverGeneration;
+    private Func<Task>? _drawerPrimaryAction;
+    private IInputElement? _drawerPreviousFocus;
 
     private sealed record DownloadFailure(string Page, string Module, string Reason, string TargetDirectory, string Instruction);
 
@@ -65,7 +67,8 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _hoverShowTimer.Tick += (_, _) => ShowHoverInfoNow();
-        SourceInitialized += (_, _) => EnableRoundedWindowCorners();
+        SourceInitialized += (_, _) => EnableModernWindowBackdrop();
+        SizeChanged += (_, _) => UpdateResponsiveGrids();
         _settings = SettingsService.Load();
         _active = "系统优化";
         ApplyTheme();
@@ -89,19 +92,39 @@ public partial class MainWindow : Window
         NavPanel.Children.Clear();
         foreach (var category in _categories)
         {
+            var selected = category.Name == _active;
+            var content = new Grid { HorizontalAlignment = HorizontalAlignment.Stretch };
+            content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(30) });
+            content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            content.Children.Add(new TextBlock { Text = NavigationIcon(category.Name), FontFamily = new FontFamily("Segoe Fluent Icons"), FontSize = 16, Foreground = selected ? BrushOf("Blue") : BrushOf("Muted"), VerticalAlignment = VerticalAlignment.Center });
+            var label = new TextBlock { Text = category.Name, FontSize = 14, FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left, TextAlignment = TextAlignment.Left };
+            Grid.SetColumn(label, 1);
+            content.Children.Add(label);
             var button = new Button
             {
-                Content = new TextBlock { Text = category.Name, FontSize = 15, FontWeight = FontWeights.SemiBold },
+                Content = content,
                 HorizontalContentAlignment = HorizontalAlignment.Left,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
                 Height = 44,
-                Margin = new Thickness(0, 0, 0, 8),
-                Background = category.Name == _active ? BrushOf("BlueSoft") : Brushes.Transparent,
-                BorderBrush = category.Name == _active ? BrushOf("Blue") : Brushes.Transparent
+                Padding = new Thickness(12, 0, 12, 0),
+                Margin = new Thickness(0, 0, 0, 6),
+                Background = selected ? BrushOf("BlueSoft") : Brushes.Transparent,
+                BorderBrush = selected ? BrushOf("Blue") : Brushes.Transparent,
+                BorderThickness = selected ? new Thickness(1) : new Thickness(0)
             };
             button.Click += async (_, _) => await SelectPageAsync(category.Name);
             NavPanel.Children.Add(button);
         }
     }
+
+    private static string NavigationIcon(string page) => page switch
+    {
+        "系统优化" => "\uE9D9",
+        "系统清理" => "\uE74D",
+        "驱动管理" => "\uE950",
+        "工具箱" => "\uE90F",
+        _ => "\uE713"
+    };
 
     private async Task SelectPageAsync(string name)
     {
@@ -119,13 +142,15 @@ public partial class MainWindow : Window
         StatusText.Text = "正在加载...";
         try
         {
-            if (name == "系统优化") await RenderOptimizerAsync();
+            if (name == "系统优化") await RenderOptimizerAsync(renderVersion);
             else if (name == "系统清理") await RenderCleanerAsync();
             else if (name == "驱动管理") await RenderDriversAsync(renderVersion);
             else if (name == "工具箱") await RenderToolsAsync();
             else RenderSettings();
             await RefreshTopStatusAsync();
             StatusText.Text = "就绪";
+            ContentScrollViewer.ScrollToTop();
+            MotionService.FadeSlideIn(ContentPanel);
         }
         catch (Exception ex)
         {
@@ -177,7 +202,7 @@ public partial class MainWindow : Window
         TopStatusPanel.Children.Add(border);
     }
 
-    private async Task RenderOptimizerAsync()
+    private async Task RenderOptimizerAsync(int renderVersion)
     {
         var status = await _optimizer.GetComponentStatusAsync();
         if (_optimizerComponentBusy) status = status with { State = ComponentState.Downloading, Text = "获取远端服务中" };
@@ -200,8 +225,13 @@ public partial class MainWindow : Window
                 _optimizerComponentBusy = false;
                 await SelectPageAsync("系统优化");
             }
-        }));
-        AddActionButton("恢复默认", async () => await RestoreAllAsync());
+        }), false);
+        AddActionButton("扫描并恢复", async () => await RestoreAllAsync(), true);
+        AddActionButton("刷新状态", async () =>
+        {
+            _optimizer.InvalidateLiveStateCache();
+            await SelectPageAsync("系统优化");
+        });
         if (!AdminService.IsAdministrator) AddActionButton("管理员重启", () => AdminService.RestartAsAdministrator());
 
         AddOptimizerStatusCard(status);
@@ -209,13 +239,49 @@ public partial class MainWindow : Window
         var locked = status.State != ComponentState.Online;
 
         var items = await _optimizer.GetItemsAsync();
+        Dictionary<string, OptimizationStateInfo> liveStates;
+        if (_optimizer.TryGetLiveStateCache(items, out liveStates, out var stale))
+        {
+            if (stale) _ = RefreshOptimizerStatesInBackgroundAsync(items, renderVersion, !locked);
+        }
+        else
+        {
+            var stateLoading = AddLoadingCard("正在核对 24 个优化项目的真实系统状态，首次扫描可能需要几秒...");
+            liveStates = await _optimizer.GetLiveStatesAsync(items);
+            ContentPanel.Children.Remove(stateLoading);
+        }
+        ContentPanel.Children.Add(CreateOptimizerGrid(items, liveStates, !locked));
+    }
+
+    private UniformGrid CreateOptimizerGrid(List<OptimizerItem> items, Dictionary<string, OptimizationStateInfo> liveStates, bool enabled)
+    {
         var grid = CreateCardGrid();
+        grid.Uid = "OptimizerCards";
         foreach (var item in items.OrderBy(OptimizerSortRisk).ThenBy(OptimizerSortRecommended).ThenBy(x => OptimizerGroupOrder(x.Group)).ThenBy(x => x.Order))
         {
-            var applied = await _optimizer.IsAppliedAsync(item.Id);
-            grid.Children.Add(CreateOptimizerCard(item, applied, !locked));
+            grid.Children.Add(CreateOptimizerCard(item, liveStates[item.Id], enabled));
         }
-        ContentPanel.Children.Add(grid);
+        return grid;
+    }
+
+    private async Task RefreshOptimizerStatesInBackgroundAsync(List<OptimizerItem> items, int renderVersion, bool enabled)
+    {
+        try
+        {
+            var liveStates = await _optimizer.GetLiveStatesAsync(items, forceRefresh: true);
+            if (renderVersion != _renderVersion || _active != "系统优化") return;
+            var oldGrid = ContentPanel.Children.OfType<UniformGrid>().FirstOrDefault(x => x.Uid == "OptimizerCards");
+            if (oldGrid == null) return;
+            var index = ContentPanel.Children.IndexOf(oldGrid);
+            ContentPanel.Children.RemoveAt(index);
+            ContentPanel.Children.Insert(index, CreateOptimizerGrid(items, liveStates, enabled));
+            StatusText.Text = $"状态已在后台更新 · {DateTime.Now:HH:mm}";
+        }
+        catch (Exception ex)
+        {
+            if (renderVersion == _renderVersion && _active == "系统优化") StatusText.Text = "后台状态更新失败，已保留上次结果";
+            LogService.Write($"优化状态后台更新失败：{ex}");
+        }
     }
 
     private void AddOptimizerStatusCard(ComponentStatus status)
@@ -230,23 +296,27 @@ public partial class MainWindow : Window
         AddComponentHeader("OptimizerNXT", OptimizerService.PinnedVersion, description, meta, ComponentMetaColor(status), status.State != ComponentState.Online);
     }
 
-    private Border CreateOptimizerCard(OptimizerItem item, bool applied, bool enabled)
+    private Border CreateOptimizerCard(OptimizerItem item, OptimizationStateInfo live, bool enabled)
     {
         var card = CardBorder();
-        card.Padding = new Thickness(12, 10, 12, 10);
-        card.Height = 84;
+        card.Padding = new Thickness(16, 13, 14, 13);
+        card.Height = 104;
         AttachHoverInfo(card, item.Description);
-        var canToggle = enabled && !_busyOptimizerIds.Contains(item.Id);
-        card.Cursor = Cursors.Arrow;
-        card.Opacity = canToggle ? 1 : 0.48;
-        if (applied) card.BorderBrush = BrushOf("Green");
+        var applied = live.State == OptimizationLiveState.Optimized;
+        var canToggle = enabled && !_busyOptimizerIds.Contains(item.Id) && live.State is OptimizationLiveState.Default or OptimizationLiveState.Optimized;
+        card.Cursor = Cursors.Hand;
+        card.Opacity = enabled ? 1 : 0.62;
 
         var root = new Grid { VerticalAlignment = VerticalAlignment.Center };
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var copy = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        copy.Children.Add(new TextBlock
+        var titleRow = new DockPanel { LastChildFill = true };
+        var badge = StateBadge(live.State);
+        DockPanel.SetDock(badge, Dock.Right);
+        titleRow.Children.Add(badge);
+        titleRow.Children.Add(new TextBlock
         {
             Text = item.Title,
             FontSize = 14,
@@ -254,24 +324,48 @@ public partial class MainWindow : Window
             Foreground = item.Risk == "high" ? BrushOf("Red") : BrushOf("Text"),
             TextWrapping = TextWrapping.Wrap,
             MaxHeight = 34,
-            LineHeight = 18
+            LineHeight = 18,
+            VerticalAlignment = VerticalAlignment.Center
         });
+        copy.Children.Add(titleRow);
         copy.Children.Add(new TextBlock
         {
-            Text = item.Description,
+            Text = live.State is OptimizationLiveState.Mixed or OptimizationLiveState.Unknown ? live.Detail : item.Description,
             Foreground = item.Risk == "high" ? BrushOf("Red") : BrushOf("Muted"),
             FontSize = 11,
             Margin = new Thickness(0, 4, 8, 0),
             TextTrimming = TextTrimming.CharacterEllipsis,
-            Height = 17
+            Height = 18
         });
-        var state = CreateOptimizerSwitch(item, applied, canToggle);
+        var state = CreateOptimizerSwitch(item, live.State, canToggle);
         Grid.SetColumn(copy, 0);
         Grid.SetColumn(state, 1);
         root.Children.Add(copy);
         root.Children.Add(state);
         card.Child = root;
+        card.MouseLeftButtonUp += (_, _) => ShowOptimizerStateDrawer(item, live);
         return card;
+    }
+
+    private Border StateBadge(OptimizationLiveState state)
+    {
+        var (text, color) = state switch
+        {
+            OptimizationLiveState.Default => ("默认", "Muted"),
+            OptimizationLiveState.Optimized => ("已优化", "Green"),
+            OptimizationLiveState.Mixed => ("混合", "Yellow"),
+            OptimizationLiveState.ExternallyManaged => ("策略管理", "Blue"),
+            OptimizationLiveState.RestartRequired => ("需重启", "Yellow"),
+            OptimizationLiveState.Unsupported => ("不适用", "Muted"),
+            _ => ("待确认", "Yellow")
+        };
+        return new Border
+        {
+            Background = BrushOf("Panel3"), BorderBrush = BrushOf(color), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(9),
+            Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(10, 0, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Child = new TextBlock { Text = text, Foreground = BrushOf(color), FontSize = 10, FontWeight = FontWeights.SemiBold }
+        };
     }
 
     private static int OptimizerSortRisk(OptimizerItem item) => item.Risk == "high" ? 1 : 0;
@@ -294,8 +388,9 @@ public partial class MainWindow : Window
         _ => 999
     };
 
-    private Border CreateOptimizerSwitch(OptimizerItem item, bool applied, bool enabled)
+    private Border CreateOptimizerSwitch(OptimizerItem item, OptimizationLiveState liveState, bool enabled)
     {
+        var applied = liveState == OptimizationLiveState.Optimized;
         var pill = new Border
         {
             Width = 54,
@@ -309,26 +404,46 @@ public partial class MainWindow : Window
             Opacity = enabled ? 1 : 0.75,
             VerticalAlignment = VerticalAlignment.Center
         };
-        pill.Child = new Ellipse
+        var knobTransform = new TranslateTransform(applied ? 26 : 0, 0);
+        var knob = new Ellipse
         {
             Width = 20,
             Height = 20,
             Fill = BrushOf("Text"),
-            Margin = applied ? new Thickness(29, 3, 3, 3) : new Thickness(4, 3, 28, 3)
+            Margin = new Thickness(4, 3, 28, 3),
+            RenderTransform = knobTransform
         };
+        pill.Child = knob;
         if (enabled)
         {
             pill.MouseLeftButtonUp += async (_, e) =>
             {
                 e.Handled = true;
-                await ToggleOptimizerAsync(item, applied);
+                await ToggleOptimizerAsync(item, liveState);
             };
         }
         return pill;
     }
 
-    private async Task ToggleOptimizerAsync(OptimizerItem item, bool applied)
+    private async Task ToggleOptimizerAsync(OptimizerItem item, OptimizationLiveState state)
     {
+        var applied = state == OptimizationLiveState.Optimized;
+        if (state is not (OptimizationLiveState.Default or OptimizationLiveState.Optimized))
+        {
+            ShowOptimizerStateDrawer(item, new OptimizationStateInfo(item.Id, state, "当前状态不能安全地直接切换，请先执行扫描恢复。", 0, 0));
+            return;
+        }
+        if (!applied && item.Risk == "high")
+        {
+            OpenDrawer("高风险优化确认", item.Title, new TextBlock { Text = item.Description + "\n\n该操作可能改变 Windows 安全、更新或硬件兼容行为。执行前会创建精确快照。", TextWrapping = TextWrapping.Wrap, LineHeight = 22 }, "仍要执行", async () => await ExecuteOptimizerToggleAsync(item, false));
+            return;
+        }
+        await ExecuteOptimizerToggleAsync(item, applied);
+    }
+
+    private async Task ExecuteOptimizerToggleAsync(OptimizerItem item, bool applied)
+    {
+        await CloseDrawerAsync();
         if (!_busyOptimizerIds.Add(item.Id)) return;
         try
         {
@@ -344,7 +459,6 @@ public partial class MainWindow : Window
                 }
                 else
                 {
-                    if (item.Risk == "high" && MessageBox.Show($"“{item.Title}”属于高风险项目，可能影响 Windows 默认功能。确认继续吗？", "高风险确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
                     StatusText.Text = $"正在优化：{item.Title}";
                     await _optimizer.ApplyAsync(item, _shutdown.Token);
                     StatusText.Text = $"已优化：{item.Title}";
@@ -640,6 +754,12 @@ public partial class MainWindow : Window
             _drivers.ClearCache();
             await SelectPageAsync("驱动管理");
         });
+        if (!_forceDriverRefresh && _drivers.TryGetPageCache(out var cached, out var stale) && cached != null)
+        {
+            RenderDriverData(cached);
+            if (stale) _ = RefreshDriversInBackgroundAsync(renderVersion);
+            return;
+        }
         var loading = AddLoadingCard(_forceDriverRefresh ? "正在刷新驱动状态..." : "正在读取驱动状态...");
         try
         {
@@ -647,45 +767,7 @@ public partial class MainWindow : Window
             _forceDriverRefresh = false;
             if (renderVersion != _renderVersion || _active != "驱动管理") return;
             ContentPanel.Children.Remove(loading);
-
-            AddDriverHealthCard(data);
-            var info = data.Device;
-            var vendorText = string.IsNullOrWhiteSpace(info.VendorDisplayName) ? "暂无信息" : info.VendorDisplayName;
-            var deviceCard = ActionCard(
-                "当前设备",
-                $"{info.Manufacturer} · {info.Model}\n厂商：{vendorText}\n{info.DeviceIdentifierLabel}：{info.DeviceIdentifierValue}\n缓存时间：{data.CachedAt:yyyy-MM-dd HH:mm:ss}",
-                info.MatchSuccess ? "Border" : "Yellow");
-            var deviceActions = (StackPanel)((Grid)deviceCard.Child).Children[1];
-            var copyIdentifier = SmallButton("复制", () =>
-            {
-                if (!info.CanCopyIdentifier) return;
-                Clipboard.SetText(info.DeviceIdentifierValue);
-                StatusText.Text = $"已复制 {info.DeviceIdentifierLabel}";
-            }, 72);
-            copyIdentifier.IsEnabled = info.CanCopyIdentifier;
-            deviceActions.Children.Add(copyIdentifier);
-            ContentPanel.Children.Add(deviceCard);
-            var actionCard = ActionCard("官方驱动中心", string.IsNullOrWhiteSpace(info.SupportPage) ? "未匹配到厂商官网入口。" : info.SupportPage, info.MatchSuccess ? "Green" : "Yellow");
-            var actions = (StackPanel)((Grid)actionCard.Child).Children[1];
-            if (!string.IsNullOrWhiteSpace(info.DownloadUrl))
-                actions.Children.Add(SmallButton("一键下载", async () => await RunGuardedAsync(async () =>
-                {
-                    StatusText.Text = "正在下载官方驱动包...";
-                    var path = await _drivers.DownloadDriverPackageAsync(info, _shutdown.Token);
-                    MessageBox.Show($"驱动包已下载：\n{path}", "驱动下载", MessageBoxButton.OK, MessageBoxImage.Information);
-                })));
-            actions.Children.Add(SmallButton("打开官网", () =>
-            {
-                var url = string.IsNullOrWhiteSpace(info.SupportPage) ? "https://www.microsoft.com/windows" : info.SupportPage;
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-            }, 104));
-            ContentPanel.Children.Add(actionCard);
-
-            AddSectionTitle("驱动反馈", "主要设备");
-            var grid = CreateCardGrid();
-            foreach (var driver in data.Drivers)
-                grid.Children.Add(SimpleMiniCard(driver.Name, driver.Detail, driver.Status));
-            ContentPanel.Children.Add(grid);
+            RenderDriverData(data);
         }
         catch (Exception ex)
         {
@@ -695,6 +777,96 @@ public partial class MainWindow : Window
             AddInfoCard("驱动状态加载失败", ex.Message, true);
             LogService.Write($"驱动状态加载失败：{ex}");
         }
+    }
+
+    private async Task RefreshDriversInBackgroundAsync(int renderVersion)
+    {
+        try
+        {
+            await _drivers.GetPageDataAsync(forceRefresh: true);
+            if (renderVersion == _renderVersion && _active == "驱动管理") StatusText.Text = $"驱动信息已在后台更新 · {DateTime.Now:HH:mm}";
+        }
+        catch (Exception ex)
+        {
+            if (renderVersion == _renderVersion && _active == "驱动管理") StatusText.Text = "后台刷新失败，已保留上次驱动信息";
+            LogService.Write($"驱动信息后台刷新失败：{ex}");
+        }
+    }
+
+    private void RenderDriverData(DriverPageData data)
+    {
+        AddDriverHealthCard(data);
+        var info = data.Device;
+        var identity = data.Identity;
+        var vendorText = string.IsNullOrWhiteSpace(info.VendorDisplayName) ? "暂无信息" : info.VendorDisplayName;
+        var deviceCard = ActionCard(
+            $"当前设备  ·  {IdentityConfidenceText(identity.Confidence)}",
+            $"{info.Manufacturer} · {info.Model}\n厂商：{vendorText}\n固件报告 {info.DeviceIdentifierLabel}：{DeviceIdentifierResolver.Mask(info.DeviceIdentifierValue)}\n身份摘要：{identity.StableDigest}\n驱动状态缓存：{data.CachedAt:yyyy-MM-dd HH:mm:ss}",
+            identity.Confidence == IdentityConfidence.Low ? "Yellow" : identity.Confidence == IdentityConfidence.High ? "Green" : "Border");
+        var deviceActions = (StackPanel)((Grid)deviceCard.Child).Children[1];
+        deviceActions.Children.Add(SmallButton("识别依据", () => ShowDriverIdentityDrawer(info, identity), 92));
+        var copyIdentifier = SmallButton("复制", () =>
+        {
+            if (!info.CanCopyIdentifier) return;
+            Clipboard.SetText(info.DeviceIdentifierValue);
+            StatusText.Text = $"已复制 {info.DeviceIdentifierLabel}";
+        }, 72);
+        copyIdentifier.IsEnabled = info.CanCopyIdentifier;
+        deviceActions.Children.Add(copyIdentifier);
+        ContentPanel.Children.Add(deviceCard);
+        if (identity.Confidence == IdentityConfidence.Low)
+            AddInfoCard("机器识别置信度较低", "固件字段存在冲突、占位值或虚拟环境特征。软件不会据此自动匹配具体驱动包，请在厂商官网手动确认型号。", true, "Yellow");
+        var actionCard = ActionCard("官方驱动中心", string.IsNullOrWhiteSpace(info.SupportPage) ? "未匹配到厂商官网入口。" : info.SupportPage, info.MatchSuccess ? "Green" : "Yellow");
+        var actions = (StackPanel)((Grid)actionCard.Child).Children[1];
+        if (!string.IsNullOrWhiteSpace(info.DownloadUrl))
+            actions.Children.Add(SmallButton("一键下载", async () => await RunGuardedAsync(async () =>
+            {
+                StatusText.Text = "正在下载官方驱动包...";
+                var path = await _drivers.DownloadDriverPackageAsync(info, _shutdown.Token);
+                OpenDrawer("驱动包校验完成", "下载文件已通过域名、SHA-256 与数字签名校验。", new TextBlock { Text = path, TextWrapping = TextWrapping.Wrap }, "关闭", null);
+            })));
+        actions.Children.Add(SmallButton("打开官网", () =>
+        {
+            var url = string.IsNullOrWhiteSpace(info.SupportPage) ? "https://www.microsoft.com/windows" : info.SupportPage;
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }, 104));
+        ContentPanel.Children.Add(actionCard);
+
+        AddSectionTitle("驱动反馈", "主要设备");
+        var grid = CreateCardGrid();
+        foreach (var driver in data.Drivers)
+            grid.Children.Add(SimpleMiniCard(driver.Name, driver.Detail, driver.Status));
+        ContentPanel.Children.Add(grid);
+    }
+
+    private static string IdentityConfidenceText(IdentityConfidence confidence) => confidence switch
+    {
+        IdentityConfidence.High => "高置信度",
+        IdentityConfidence.Medium => "中等置信度",
+        _ => "低置信度"
+    };
+
+    private void ShowDriverIdentityDrawer(DeviceMatchInfo info, DeviceIdentityAssessment identity)
+    {
+        var content = new StackPanel();
+        content.Children.Add(new Border
+        {
+            Background = BrushOf(identity.Confidence == IdentityConfidence.Low ? "Panel3" : "BlueSoft"), CornerRadius = new CornerRadius(14), Padding = new Thickness(16), Margin = new Thickness(0, 0, 0, 14),
+            Child = new TextBlock { Text = $"{IdentityConfidenceText(identity.Confidence)}\n{identity.Summary}", TextWrapping = TextWrapping.Wrap, LineHeight = 22 }
+        });
+        foreach (var candidate in identity.Candidates)
+        {
+            var row = new Border { Background = BrushOf("Panel2"), BorderBrush = BrushOf("Border"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), Padding = new Thickness(14), Margin = new Thickness(0, 0, 0, 9) };
+            var panel = new StackPanel();
+            panel.Children.Add(new TextBlock { Text = candidate.Label, FontWeight = FontWeights.SemiBold });
+            panel.Children.Add(new TextBlock { Text = candidate.MaskedValue, FontFamily = new FontFamily("Consolas"), Margin = new Thickness(0, 5, 0, 0) });
+            panel.Children.Add(new TextBlock { Text = $"{candidate.Source} · {candidate.Note}", Foreground = BrushOf("Muted"), FontSize = 11, Margin = new Thickness(0, 5, 0, 0) });
+            row.Child = panel;
+            content.Children.Add(row);
+        }
+        if (identity.Conflicts.Count > 0)
+            content.Children.Add(new TextBlock { Text = "冲突：\n" + string.Join("\n", identity.Conflicts.Select(x => "• " + x)), Foreground = BrushOf("Yellow"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0), LineHeight = 21 });
+        OpenDrawer("机器识别依据", "这些值均为 Windows 当前读取到的固件报告值，不能证明是修改前的原始出厂编号。", content, "关闭", null);
     }
 
     private Border AddLoadingCard(string text)
@@ -717,6 +889,7 @@ public partial class MainWindow : Window
 
     private async Task RenderToolsAsync()
     {
+        AddAdvancedSystemTools();
         AddSectionTitle("工具箱", "固定 GitHub Release tools-v1");
         AddDownloadFailureCard("工具箱");
         var grid = CreateCardGrid();
@@ -726,33 +899,88 @@ public partial class MainWindow : Window
             var actions = (StackPanel)((Grid)card.Child).Children[1];
             actions.Children.Add(SmallButton("启动", async () => await RunGuardedAsync(async () =>
             {
-                if (tool.Dangerous && MessageBox.Show($"“{tool.Name}”可能修改系统设置，确认启动吗？", "确认启动", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-                ClearDownloadFailure("工具箱");
-                StatusText.Text = $"正在准备工具：{tool.Name}";
-                try
+                if (tool.Dangerous)
                 {
-                    StatusText.Text = await _toolbox.DownloadAndLaunchAsync(tool, _shutdown.Token);
+                    var warning = tool.Id == "disableSecurityUpdate"
+                        ? "该独立工具既能修改 Windows Update，也可能关闭 Defender 安全中心、更新服务和 Microsoft Store 依赖组件。它不属于 24 项优化、不使用 YAML，且不在本软件的全局恢复承诺内。"
+                        : "该工具由独立程序执行，可能修改系统设置，不属于本软件的全局恢复范围。";
+                    OpenDrawer("高级工具确认", tool.Name, new TextBlock { Text = tool.Description + "\n\n" + warning, TextWrapping = TextWrapping.Wrap, LineHeight = 22 }, "确认启动", async () => await LaunchToolAsync(tool));
+                    return;
                 }
-                catch (Exception ex)
-                {
-                    SetDownloadFailure("工具箱", tool.Name, ex, AppPaths.ToolRuntime, "请在备用下载页下载对应工具压缩包，并将 zip 内容解压到下面的目标目录。");
-                    throw;
-                }
-                finally
-                {
-                    if (_active == "工具箱") await SelectPageAsync("工具箱");
-                }
+                await LaunchToolAsync(tool);
             })));
             grid.Children.Add(card);
         }
         ContentPanel.Children.Add(grid);
     }
 
+    private async Task LaunchToolAsync(ToolItem tool)
+    {
+        await CloseDrawerAsync();
+        ClearDownloadFailure("工具箱");
+        StatusText.Text = $"正在准备工具：{tool.Name}";
+        try { StatusText.Text = await _toolbox.DownloadAndLaunchAsync(tool, _shutdown.Token); }
+        catch (Exception ex)
+        {
+            SetDownloadFailure("工具箱", tool.Name, ex, AppPaths.ToolRuntime, "请在备用下载页下载对应工具压缩包，并将 zip 内容解压到下面的目标目录。");
+            throw;
+        }
+        finally { if (_active == "工具箱") await SelectPageAsync("工具箱"); }
+    }
+
+    private void AddAdvancedSystemTools()
+    {
+        AddSectionTitle("高级系统操作", "不参与全局优化恢复");
+        var restore = ActionCard("系统还原管理  ·  高级", "单独管理系统保护。停用操作不会删除已有还原点；已有还原点一旦被其他工具删除则无法找回。", "Yellow");
+        var restoreActions = (StackPanel)((Grid)restore.Child).Children[1];
+        restoreActions.Children.Add(SmallButton("打开设置", () => Process.Start(new ProcessStartInfo("SystemPropertiesProtection.exe") { UseShellExecute = true }), 88));
+        restoreActions.Children.Add(SmallButton("恢复保护", async () => await RunGuardedAsync(async () => await SetSystemRestoreAsync(true)), 88));
+        ContentPanel.Children.Add(restore);
+
+        var oneDrive = ActionCard("OneDrive 管理  ·  高级", "卸载与重新安装从普通优化中移出。卸载不会删除云端文件，但可能移除本机同步状态。", "Yellow");
+        var oneDriveActions = (StackPanel)((Grid)oneDrive.Child).Children[1];
+        oneDriveActions.Children.Add(SmallButton("重新安装", async () => await RunGuardedAsync(async () => await RunOneDriveSetupAsync(false)), 88));
+        var uninstall = SmallButton("卸载", () => OpenDrawer("卸载 OneDrive", "这是独立的高级操作，不属于可逆优化。", new TextBlock { Text = "继续后将调用 Windows 自带 OneDrive 安装程序执行卸载。本机同步配置可能需要重新设置。", TextWrapping = TextWrapping.Wrap, LineHeight = 22 }, "确认卸载", async () => await RunOneDriveSetupAsync(true)), 72);
+        uninstall.Style = (Style)Application.Current.Resources["DangerButtonStyle"];
+        oneDriveActions.Children.Add(uninstall);
+        ContentPanel.Children.Add(oneDrive);
+    }
+
+    private async Task SetSystemRestoreAsync(bool enable)
+    {
+        EnsureAdminOrThrow();
+        var command = enable ? "Enable-ComputerRestore -Drive 'C:\\'; Checkpoint-Computer -Description 'WindowsLite 安全恢复点' -RestorePointType MODIFY_SETTINGS -ErrorAction SilentlyContinue" : "Disable-ComputerRestore -Drive 'C:\\'";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(command));
+        var result = await RunLocalProcessAsync("powershell.exe", $"-NoProfile -EncodedCommand {encoded}");
+        if (result.ExitCode != 0) throw new InvalidOperationException(result.Output);
+        StatusText.Text = enable ? "系统保护已恢复，并尝试创建安全恢复点" : "系统保护已停用（未删除已有还原点）";
+    }
+
+    private async Task RunOneDriveSetupAsync(bool uninstall)
+    {
+        EnsureAdminOrThrow();
+        await CloseDrawerAsync();
+        var candidates = new[] { System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SysWOW64", "OneDriveSetup.exe"), System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "OneDriveSetup.exe") };
+        var setup = candidates.FirstOrDefault(File.Exists) ?? throw new FileNotFoundException("Windows 自带 OneDriveSetup.exe 不存在，请从 Microsoft 官网重新获取 OneDrive。");
+        var result = await RunLocalProcessAsync(setup, uninstall ? "/uninstall" : "");
+        if (result.ExitCode != 0) throw new InvalidOperationException(result.Output);
+        StatusText.Text = uninstall ? "OneDrive 卸载流程已完成" : "OneDrive 安装程序已完成";
+    }
+
+    private static async Task<(int ExitCode, string Output)> RunLocalProcessAsync(string file, string arguments)
+    {
+        var psi = new ProcessStartInfo(file, arguments) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        using var process = Process.Start(psi) ?? throw new InvalidOperationException("无法启动系统操作。");
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        return (process.ExitCode, ((await stdout) + Environment.NewLine + (await stderr)).Trim());
+    }
+
     private Border CreateToolCard(ToolItem tool)
     {
         var card = CardBorder();
         card.Height = 112;
-        card.BorderBrush = BrushOf("Green");
         AttachHoverInfo(card, tool.Description);
 
         var root = new Grid();
@@ -844,7 +1072,6 @@ public partial class MainWindow : Window
         Grid.SetColumn(actions, 1);
         root.Children.Add(copy);
         root.Children.Add(actions);
-        card.BorderBrush = BrushOf(colorKey);
         card.Child = root;
         return card;
     }
@@ -951,7 +1178,6 @@ public partial class MainWindow : Window
     private void AddComponentHeader(string name, string version, string description, string meta, string metaColorKey, bool warning)
     {
         var card = CardBorder();
-        card.BorderBrush = BrushOf(metaColorKey);
         var root = new Grid();
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -1029,7 +1255,17 @@ public partial class MainWindow : Window
         ContentPanel.Children.Add(row);
     }
 
-    private UniformGrid CreateCardGrid() => new() { Columns = 2, Margin = new Thickness(0, 0, 0, 4) };
+    private UniformGrid CreateCardGrid()
+    {
+        var grid = new UniformGrid { Columns = MainContentGrid.ActualWidth >= 760 ? 2 : 1, Margin = new Thickness(0, 0, 0, 6), Tag = "ResponsiveCards" };
+        return grid;
+    }
+
+    private void UpdateResponsiveGrids()
+    {
+        var columns = MainContentGrid.ActualWidth >= 760 ? 2 : 1;
+        foreach (var grid in ContentPanel.Children.OfType<UniformGrid>().Where(x => Equals(x.Tag, "ResponsiveCards"))) grid.Columns = columns;
+    }
 
     private void AttachHoverInfo(FrameworkElement element, string text)
     {
@@ -1110,7 +1346,7 @@ public partial class MainWindow : Window
         const double edgePadding = 10;
         HoverInfoPopup.UpdateLayout();
 
-        var popupWidth = HoverInfoPopup.ActualWidth > 0 ? HoverInfoPopup.ActualWidth : HoverInfoPopup.Width;
+        var popupWidth = HoverInfoPopup.ActualWidth > 0 ? HoverInfoPopup.ActualWidth : HoverInfoPopup.DesiredSize.Width;
         var popupHeight = HoverInfoPopup.ActualHeight > 0 ? HoverInfoPopup.ActualHeight : HoverInfoPopup.DesiredSize.Height;
         var x = pointer.X + offsetX;
         var y = pointer.Y + offsetY;
@@ -1179,15 +1415,20 @@ public partial class MainWindow : Window
         _isHoverInfoVisible = false;
     }
 
-    private Border CardBorder() => new()
+    private Border CardBorder()
     {
-        Background = BrushOf("Panel2"),
-        BorderBrush = BrushOf("Border"),
-        BorderThickness = new Thickness(1),
-        CornerRadius = new CornerRadius(8),
-        Padding = new Thickness(12),
-        Margin = new Thickness(0, 0, 10, 10)
-    };
+        var card = new Border
+        {
+            Background = BrushOf("Panel2"),
+            BorderBrush = BrushOf("Border"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            Padding = new Thickness(16),
+            Margin = new Thickness(0, 0, 12, 12)
+        };
+        MotionService.AttachCardMotion(card);
+        return card;
+    }
 
     private Button SmallButton(string text, Action action, double minWidth = 96)
     {
@@ -1203,16 +1444,18 @@ public partial class MainWindow : Window
         return button;
     }
 
-    private void AddActionButton(string text, Action action)
+    private void AddActionButton(string text, Action action, bool primary = false)
     {
         var button = new Button { Content = text, Margin = new Thickness(6, 3, 0, 3), MinWidth = 104, Height = 38, Padding = new Thickness(10, 7, 10, 7), FontSize = 14, FontWeight = FontWeights.SemiBold };
+        if (primary) button.Style = (Style)Application.Current.Resources["PrimaryButtonStyle"];
         button.Click += (_, _) => action();
         PageActionPanel.Children.Add(button);
     }
 
-    private void AddActionButton(string text, Func<Task> action)
+    private void AddActionButton(string text, Func<Task> action, bool primary = false)
     {
         var button = new Button { Content = text, Margin = new Thickness(6, 3, 0, 3), MinWidth = 104, Height = 38, Padding = new Thickness(10, 7, 10, 7), FontSize = 14, FontWeight = FontWeights.SemiBold };
+        if (primary) button.Style = (Style)Application.Current.Resources["PrimaryButtonStyle"];
         button.Click += async (_, _) => await action();
         PageActionPanel.Children.Add(button);
     }
@@ -1232,12 +1475,173 @@ public partial class MainWindow : Window
     {
         await RunGuardedAsync(async () =>
         {
-            EnsureAdminOrThrow();
-            if (MessageBox.Show("将恢复所有已记录快照的优化项目，确认继续吗？", "恢复默认", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-            StatusText.Text = "正在恢复默认...";
-            MessageBox.Show(await _optimizer.RestoreAllAsync(), "恢复默认", MessageBoxButton.OK, MessageBoxImage.Information);
-            await SelectPageAsync("系统优化");
+            StatusText.Text = "正在扫描真实系统状态...";
+            var plan = await _optimizer.BuildRestorePlanAsync();
+            ShowRestorePlanDrawer(plan);
+            StatusText.Text = $"扫描完成：{plan.ChangeCount} 项需要处理";
         });
+    }
+
+    private void ShowRestorePlanDrawer(RestorePlan plan)
+    {
+        var content = new StackPanel();
+        content.Children.Add(new Border
+        {
+            Background = BrushOf("BlueSoft"), CornerRadius = new CornerRadius(14), Padding = new Thickness(16), Margin = new Thickness(0, 0, 0, 14),
+            Child = new TextBlock { Text = $"扫描了 {plan.Items.Count} 个项目，其中 {plan.ChangeCount} 个将执行安全默认恢复。恢复前会额外创建应急快照。", TextWrapping = TextWrapping.Wrap, LineHeight = 21 }
+        });
+        foreach (var item in plan.Items)
+        {
+            var card = new Border { Background = BrushOf("Panel2"), BorderBrush = BrushOf("Border"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), Padding = new Thickness(14), Margin = new Thickness(0, 0, 0, 10) };
+            var panel = new StackPanel();
+            var row = new DockPanel { LastChildFill = true };
+            var badge = StateBadge(item.CurrentState); DockPanel.SetDock(badge, Dock.Right); row.Children.Add(badge);
+            row.Children.Add(new TextBlock { Text = item.Title, FontWeight = FontWeights.SemiBold, FontSize = 14 });
+            panel.Children.Add(row);
+            panel.Children.Add(new TextBlock { Text = item.Detail, Foreground = BrushOf("Muted"), FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 7, 0, 0), LineHeight = 19 });
+            card.Child = panel;
+            content.Children.Add(card);
+        }
+        OpenDrawer("恢复预检", "恢复不依赖本地 Applied 记录；外部策略和无法推导的原值会明确跳过或标记为部分恢复。", content, plan.ChangeCount > 0 ? "恢复所列项目" : "无需恢复", plan.ChangeCount > 0 ? async () => await ExecuteRestorePlanAsync(plan) : null);
+    }
+
+    private async Task ExecuteRestorePlanAsync(RestorePlan plan)
+    {
+        EnsureAdminOrThrow();
+        DrawerPrimaryButton.IsEnabled = false;
+        DrawerCancelButton.IsEnabled = false;
+        DrawerPrimaryButton.Content = "正在恢复...";
+        StatusText.Text = "正在执行安全默认恢复...";
+        try
+        {
+            var report = await _optimizer.RestoreDefaultsAsync(plan);
+            ShowRestoreResultsDrawer(report);
+            StatusText.Text = report.Ok ? "默认恢复完成" : "默认恢复包含部分失败";
+            if (_active == "系统优化") await SelectPageAsync("系统优化");
+        }
+        finally
+        {
+            DrawerPrimaryButton.IsEnabled = true;
+            DrawerCancelButton.IsEnabled = true;
+        }
+    }
+
+    private void ShowRestoreResultsDrawer(RestoreExecutionReport report)
+    {
+        var content = new StackPanel();
+        foreach (var item in report.Items)
+        {
+            var color = item.Status is RestoreItemStatus.Restored or RestoreItemStatus.AlreadyDefault ? "Green" : item.Status is RestoreItemStatus.Failed ? "Red" : "Yellow";
+            var card = new Border { Background = BrushOf("Panel2"), BorderBrush = BrushOf(color), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), Padding = new Thickness(14), Margin = new Thickness(0, 0, 0, 10) };
+            var panel = new StackPanel();
+            panel.Children.Add(new TextBlock { Text = $"{item.Title}  ·  {RestoreStatusText(item.Status)}", Foreground = BrushOf(color), FontWeight = FontWeights.SemiBold });
+            panel.Children.Add(new TextBlock { Text = item.Detail, Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0), FontSize = 12 });
+            card.Child = panel;
+            content.Children.Add(card);
+        }
+        OpenDrawer(report.Ok ? "恢复完成" : "恢复结果需要关注", $"详细报告已保存：{report.ReportPath}", content, "关闭", null);
+    }
+
+    private static string RestoreStatusText(RestoreItemStatus status) => status switch
+    {
+        RestoreItemStatus.Restored => "已恢复",
+        RestoreItemStatus.AlreadyDefault => "已经默认",
+        RestoreItemStatus.Partial => "部分恢复",
+        RestoreItemStatus.Skipped => "已跳过",
+        RestoreItemStatus.Failed => "失败",
+        _ => "需要重启"
+    };
+
+    private void ShowOptimizerStateDrawer(OptimizerItem item, OptimizationStateInfo live)
+    {
+        var content = new StackPanel();
+        content.Children.Add(StateBadge(live.State));
+        content.Children.Add(new TextBlock { Text = live.Detail, TextWrapping = TextWrapping.Wrap, LineHeight = 22, Margin = new Thickness(0, 14, 0, 12) });
+        AddOptimizationTargetGroup(content, "已优化部分", live.TargetDetails.Where(x => x.State == OptimizationTargetState.Optimized), "Green");
+        AddOptimizationTargetGroup(content, "未优化／默认部分", live.TargetDetails.Where(x => x.State == OptimizationTargetState.Default), "Blue");
+        AddOptimizationTargetGroup(content, "需要确认", live.TargetDetails.Where(x => x.State is not (OptimizationTargetState.Optimized or OptimizationTargetState.Default)), "Yellow");
+        if (live.State == OptimizationLiveState.Mixed)
+            content.Children.Add(new TextBlock { Text = "恢复会将该项目撤销到当前 Windows 的安全默认基线，并在执行前创建应急快照。它不会依赖 Applied 记录，但无法保证保留第三方程序写入的自定义值。", Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, LineHeight = 21, Margin = new Thickness(0, 10, 0, 0) });
+        else if (live.State is OptimizationLiveState.Unknown or OptimizationLiveState.ExternallyManaged)
+            content.Children.Add(new TextBlock { Text = "当前存在无法确认或外部管理的目标，已禁止通过普通开关盲目修改。", Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, LineHeight = 21, Margin = new Thickness(0, 10, 0, 0) });
+        OpenDrawer(item.Title, "逐目标实时系统状态", content, live.State == OptimizationLiveState.Mixed ? "尝试恢复默认" : "关闭", live.State == OptimizationLiveState.Mixed ? async () =>
+        {
+            StatusText.Text = $"正在生成单项目恢复预检：{item.Title}";
+            var plan = await _optimizer.BuildRestorePlanAsync(new[] { item.Id });
+            ShowRestorePlanDrawer(plan);
+            StatusText.Text = "单项目恢复预检已完成";
+        } : null);
+    }
+
+    private void AddOptimizationTargetGroup(StackPanel host, string title, IEnumerable<OptimizationTargetInfo> source, string color)
+    {
+        var targets = source.ToList();
+        if (targets.Count == 0) return;
+        host.Children.Add(new TextBlock { Text = $"{title} · {targets.Count}", Foreground = BrushOf(color), FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 12, 0, 8) });
+        foreach (var target in targets)
+        {
+            var card = new Border { Background = BrushOf("Panel2"), BorderBrush = BrushOf("Border"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), Padding = new Thickness(13), Margin = new Thickness(0, 0, 0, 8) };
+            var panel = new StackPanel();
+            panel.Children.Add(new TextBlock { Text = $"{target.Kind} · {OptimizationTargetStateText(target.State)}", Foreground = BrushOf(OptimizationTargetStateColor(target.State)), FontWeight = FontWeights.SemiBold, FontSize = 12 });
+            panel.Children.Add(new TextBlock { Text = target.Target, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), FontSize = 11, Margin = new Thickness(0, 5, 0, 0) });
+            panel.Children.Add(new TextBlock { Text = target.Detail, Foreground = BrushOf("Muted"), TextWrapping = TextWrapping.Wrap, FontSize = 11, LineHeight = 18, Margin = new Thickness(0, 5, 0, 0) });
+            card.Child = panel;
+            host.Children.Add(card);
+        }
+    }
+
+    private static string OptimizationTargetStateText(OptimizationTargetState state) => state switch
+    {
+        OptimizationTargetState.Optimized => "已优化",
+        OptimizationTargetState.Default => "默认／未优化",
+        OptimizationTargetState.Diverged => "其他值",
+        OptimizationTargetState.Unavailable => "不可用",
+        OptimizationTargetState.ExternallyManaged => "外部策略",
+        _ => "无法确认"
+    };
+
+    private static string OptimizationTargetStateColor(OptimizationTargetState state) => state switch
+    {
+        OptimizationTargetState.Optimized => "Green",
+        OptimizationTargetState.Default => "Blue",
+        OptimizationTargetState.ExternallyManaged => "Blue",
+        _ => "Yellow"
+    };
+
+    private void OpenDrawer(string title, string subtitle, UIElement content, string primaryText, Func<Task>? primaryAction)
+    {
+        _drawerPreviousFocus = Keyboard.FocusedElement;
+        _drawerPrimaryAction = primaryAction;
+        DrawerTitle.Text = title;
+        DrawerSubtitle.Text = subtitle;
+        DrawerContent.Children.Clear();
+        DrawerContent.Children.Add(content);
+        DrawerPrimaryButton.Content = primaryText;
+        DrawerPrimaryButton.Visibility = primaryAction == null && primaryText == "关闭" ? Visibility.Collapsed : Visibility.Visible;
+        DrawerCancelButton.Content = primaryAction == null ? "关闭" : "取消";
+        MotionService.OpenDrawer(DrawerOverlay, DrawerTransform);
+        DrawerCancelButton.Focus();
+    }
+
+    private async Task CloseDrawerAsync()
+    {
+        _drawerPrimaryAction = null;
+        await MotionService.CloseDrawerAsync(DrawerOverlay, DrawerTransform);
+        if (_drawerPreviousFocus is IInputElement focus) Keyboard.Focus(focus);
+    }
+
+    private async void DrawerClose_Click(object sender, RoutedEventArgs e) => await CloseDrawerAsync();
+    private async void DrawerBackdrop_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) => await CloseDrawerAsync();
+    private async void DrawerPrimary_Click(object sender, RoutedEventArgs e)
+    {
+        var action = _drawerPrimaryAction;
+        if (action == null) { await CloseDrawerAsync(); return; }
+        await RunGuardedAsync(action);
+    }
+
+    private async void Window_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && DrawerOverlay.Visibility == Visibility.Visible) { e.Handled = true; await CloseDrawerAsync(); }
     }
 
     private static void EnsureAdminOrThrow()
@@ -1251,13 +1655,14 @@ public partial class MainWindow : Window
                    (_settings.ThemeMode.Equals("System", StringComparison.OrdinalIgnoreCase) && !SystemUsesLightTheme());
         if (dark)
         {
-            SetBrush("Bg", "#050B12"); SetBrush("Sidebar", "#07111C"); SetBrush("Panel", "#0D1723"); SetBrush("Panel2", "#121F2D"); SetBrush("Panel3", "#17283A"); SetBrush("Border", "#223445"); SetBrush("Text", "#F1F6FF"); SetBrush("Muted", "#98A8BB"); SetBrush("BlueSoft", "#113566");
+            SetBrush("Bg", "#EE101114"); SetBrush("Sidebar", "#E815161A"); SetBrush("Panel", "#F31A1B20"); SetBrush("Panel2", "#F0202126"); SetBrush("Panel3", "#292A30"); SetBrush("Border", "#34353C"); SetBrush("Text", "#F5F5F7"); SetBrush("Muted", "#A4A5AD"); SetBrush("BlueSoft", "#193653");
         }
         else
         {
-            SetBrush("Bg", "#F5F7FB"); SetBrush("Sidebar", "#EEF3F8"); SetBrush("Panel", "#FFFFFF"); SetBrush("Panel2", "#FFFFFF"); SetBrush("Panel3", "#E7EEF7"); SetBrush("Border", "#CAD6E4"); SetBrush("Text", "#101722"); SetBrush("Muted", "#5F6F82"); SetBrush("BlueSoft", "#DCEBFF");
+            SetBrush("Bg", "#EEF5F5F7"); SetBrush("Sidebar", "#E8ECECF0"); SetBrush("Panel", "#F7FFFFFF"); SetBrush("Panel2", "#F2FFFFFF"); SetBrush("Panel3", "#E8E8ED"); SetBrush("Border", "#D1D1D6"); SetBrush("Text", "#1D1D1F"); SetBrush("Muted", "#6E6E73"); SetBrush("BlueSoft", "#DDEEFF");
         }
-        SetBrush("Blue", "#2D7DFF"); SetBrush("Green", "#31D07A"); SetBrush("Red", "#FF6470"); SetBrush("Yellow", "#F4C95D");
+        SetBrush("Blue", "#0A84FF"); SetBrush("Green", "#30D158"); SetBrush("Red", "#FF453A"); SetBrush("Yellow", "#FFD60A");
+        if (IsLoaded) EnableModernWindowBackdrop();
     }
 
     private static bool SystemUsesLightTheme()
@@ -1275,14 +1680,21 @@ public partial class MainWindow : Window
     private static string RiskText(string risk) => risk == "high" ? "高风险" : "普通项目";
     private static string TrimOutput(string text) => text.Length > 5000 ? text[..5000] + "\n\n输出较长，已截断显示，完整内容请查看日志。" : text;
 
-    private void EnableRoundedWindowCorners()
+    private void EnableModernWindowBackdrop()
     {
         try
         {
             if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
             var hwnd = new WindowInteropHelper(this).Handle;
-            var preference = 2;
-            _ = DwmSetWindowAttribute(hwnd, 33, ref preference, sizeof(int));
+            var rounded = 2;
+            _ = DwmSetWindowAttribute(hwnd, 33, ref rounded, sizeof(int));
+            if (!SystemParameters.HighContrast)
+            {
+                var backdrop = 2;
+                _ = DwmSetWindowAttribute(hwnd, 38, ref backdrop, sizeof(int));
+                var dark = _settings.ThemeMode.Equals("Dark", StringComparison.OrdinalIgnoreCase) || (_settings.ThemeMode.Equals("System", StringComparison.OrdinalIgnoreCase) && !SystemUsesLightTheme()) ? 1 : 0;
+                _ = DwmSetWindowAttribute(hwnd, 20, ref dark, sizeof(int));
+            }
         }
         catch
         {

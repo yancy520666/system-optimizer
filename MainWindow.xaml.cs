@@ -93,11 +93,11 @@ public partial class MainWindow : Window
         foreach (var category in _categories)
         {
             var selected = category.Name == _active;
-            var content = new Grid { HorizontalAlignment = HorizontalAlignment.Stretch };
-            content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(30) });
+            var content = new Grid { Width = 160, HorizontalAlignment = HorizontalAlignment.Left };
+            content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(28) });
             content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            content.Children.Add(new TextBlock { Text = NavigationIcon(category.Name), FontFamily = new FontFamily("Segoe Fluent Icons"), FontSize = 16, Foreground = selected ? BrushOf("Blue") : BrushOf("Muted"), VerticalAlignment = VerticalAlignment.Center });
-            var label = new TextBlock { Text = category.Name, FontSize = 14, FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left, TextAlignment = TextAlignment.Left };
+            content.Children.Add(new TextBlock { Text = NavigationIcon(category.Name), FontFamily = new FontFamily("Segoe Fluent Icons"), FontSize = 16, Foreground = selected ? BrushOf("Blue") : BrushOf("Muted"), VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, TextAlignment = TextAlignment.Center });
+            var label = new TextBlock { Text = category.Name, FontSize = 14, FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal, Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left, TextAlignment = TextAlignment.Left };
             Grid.SetColumn(label, 1);
             content.Children.Add(label);
             var button = new Button
@@ -226,12 +226,12 @@ public partial class MainWindow : Window
                 await SelectPageAsync("系统优化");
             }
         }), false);
-        AddActionButton("扫描并恢复", async () => await RestoreAllAsync(), true);
-        AddActionButton("刷新状态", async () =>
+        AddActionButton("刷新", async () =>
         {
             _optimizer.InvalidateLiveStateCache();
             await SelectPageAsync("系统优化");
         });
+        AddActionButton("扫描并恢复", async () => await RestoreAllAsync(), true);
         if (!AdminService.IsAdministrator) AddActionButton("管理员重启", () => AdminService.RestartAsAdministrator());
 
         AddOptimizerStatusCard(status);

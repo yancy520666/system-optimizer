@@ -11,6 +11,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Shell;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 
@@ -1686,8 +1687,14 @@ public partial class MainWindow : Window
         {
             if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
             var hwnd = new WindowInteropHelper(this).Handle;
+            var chrome = WindowChrome.GetWindowChrome(this);
+            if (chrome != null) chrome.CornerRadius = new CornerRadius(0);
+            WindowFrameBorder.CornerRadius = new CornerRadius(0);
+            SidebarBorder.CornerRadius = new CornerRadius(0);
             var rounded = 2;
             _ = DwmSetWindowAttribute(hwnd, 33, ref rounded, sizeof(int));
+            var noSystemBorder = unchecked((int)0xFFFFFFFE);
+            _ = DwmSetWindowAttribute(hwnd, 34, ref noSystemBorder, sizeof(int));
             if (!SystemParameters.HighContrast)
             {
                 var backdrop = 2;

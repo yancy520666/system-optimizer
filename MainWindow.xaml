@@ -75,14 +75,14 @@
         </Style>
     </Window.Resources>
 
-    <Border BorderThickness="1" BorderBrush="{DynamicResource Border}" CornerRadius="16" Background="{DynamicResource Bg}" SnapsToDevicePixels="True">
+    <Border x:Name="WindowFrameBorder" BorderThickness="1" BorderBrush="{DynamicResource Border}" CornerRadius="16" Background="{DynamicResource Bg}" SnapsToDevicePixels="True">
         <Grid x:Name="WindowRootGrid">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="218"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0" Background="{DynamicResource Sidebar}" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,1,0" CornerRadius="16,0,0,16">
+            <Border x:Name="SidebarBorder" Grid.Column="0" Background="{DynamicResource Sidebar}" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,1,0" CornerRadius="16,0,0,16">
                 <DockPanel Margin="16">
                     <StackPanel DockPanel.Dock="Top" Margin="4,18,0,24">
                         <StackPanel Orientation="Horizontal">

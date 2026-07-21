@@ -88,7 +88,7 @@
       "version": "local",
       "description": "清理浏览器主页、搜索和快捷方式劫持项，适合重装系统后浏览器被篡改时使用。",
       "size": 11306,
-      "sha256": "05F2B3BDD9C762E967FA71A1581B2806D77548762789C493CCF6205B35A1D672",
+      "sha256": "CC1258DF21578334ABB5C59C439CA2C6D2E59485BE4794138715BCA9EE5B2FC8",
       "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/browser-hijack-clean.bat",
       "assetName": "browser-hijack-clean.bat",
       "aliases": ["一键清理重装后的浏览器劫持.bat"]

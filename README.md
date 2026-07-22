@@ -45,7 +45,7 @@ SystemOptimizerLite-v3.1-lite-win-x64.zip/SystemOptimizerLite.exe
 
 需要目标电脑已安装 .NET 8 Desktop Runtime。
 
-轻量版发布包内提供 `启动环境自检并修复.bat`。建议普通用户双击该启动器运行：它会先检测 `.NET 8 Desktop Runtime`，缺失时自动请求管理员权限，下载并静默安装 Microsoft 官方运行时，然后启动主程序。
+简洁版不包含 .NET 运行环境，目标电脑需要预先安装 .NET 8 Desktop Runtime；压缩包仅保留单文件程序和必要的 `Data` 数据目录。
 
 自包含版发布包已内置 .NET 8 运行环境，可直接双击 `SystemOptimizerLite.exe`，无需安装额外运行时。
 

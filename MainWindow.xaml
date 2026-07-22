@@ -15,7 +15,7 @@
         KeyDown="Window_KeyDown">
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="0"
-                            CornerRadius="16"
+                            CornerRadius="0"
                             GlassFrameThickness="0"
                             NonClientFrameEdges="None"
                             ResizeBorderThickness="6"
@@ -73,16 +73,27 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="MoreMenuItemStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Height" Value="44"/>
+            <Setter Property="MinHeight" Value="44"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0,0,0,5"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+        </Style>
     </Window.Resources>
 
-    <Border x:Name="WindowFrameBorder" BorderThickness="1" BorderBrush="{DynamicResource Border}" CornerRadius="16" Background="{DynamicResource Bg}" SnapsToDevicePixels="True">
-        <Grid x:Name="WindowRootGrid">
+    <Grid ClipToBounds="True" UseLayoutRounding="True">
+        <Border x:Name="WindowFrameBorder" BorderThickness="0" CornerRadius="0" Background="{DynamicResource Bg}" SnapsToDevicePixels="True" ClipToBounds="True">
+            <Grid x:Name="WindowRootGrid">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="218"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <Border x:Name="SidebarBorder" Grid.Column="0" Background="{DynamicResource Sidebar}" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,1,0" CornerRadius="16,0,0,16">
+            <Border x:Name="SidebarBorder" Grid.Column="0" Background="{DynamicResource Sidebar}" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,1,0" CornerRadius="0">
                 <DockPanel Margin="16">
                     <StackPanel DockPanel.Dock="Top" Margin="4,18,0,24">
                         <StackPanel Orientation="Horizontal">
@@ -98,13 +109,13 @@
 
                     <Grid DockPanel.Dock="Bottom" Margin="0,12,0,4">
                         <Button x:Name="MoreButton" Content="•••" Style="{StaticResource GhostButtonStyle}" Width="42" Height="34" HorizontalAlignment="Left" Click="MoreButton_Click" ToolTip="更多"/>
-                        <Popup x:Name="MorePopup" PlacementTarget="{Binding ElementName=MoreButton}" Placement="Top" StaysOpen="False">
-                            <Border Background="{DynamicResource Panel2}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="14" Padding="7" Width="184">
+                        <Popup x:Name="MorePopup" PlacementTarget="{Binding ElementName=MoreButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade" HorizontalOffset="0" VerticalOffset="-8">
+                            <Border Background="{DynamicResource Panel2}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="14" Padding="7" Width="190" SnapsToDevicePixels="True">
                                 <StackPanel>
-                                    <Button Content="导出日志" HorizontalContentAlignment="Left" Margin="0,0,0,5" Click="ExportLogs_Click"/>
-                                    <Button Content="关于软件" HorizontalContentAlignment="Left" Margin="0,0,0,5" Click="About_Click"/>
-                                    <Button Content="帮助文档" HorizontalContentAlignment="Left" Margin="0,0,0,5" Click="Help_Click"/>
-                                    <Button Content="反馈问题" HorizontalContentAlignment="Left" IsEnabled="False"/>
+                                    <Button Content="导出日志" Style="{StaticResource MoreMenuItemStyle}" Click="ExportLogs_Click"/>
+                                    <Button Content="关于软件" Style="{StaticResource MoreMenuItemStyle}" Click="About_Click"/>
+                                    <Button Content="帮助文档" Style="{StaticResource MoreMenuItemStyle}" Click="Help_Click"/>
+                                    <Button Content="反馈问题" Style="{StaticResource MoreMenuItemStyle}" Margin="0" IsEnabled="False"/>
                                 </StackPanel>
                             </Border>
                         </Popup>
@@ -201,18 +212,21 @@
                             </StackPanel>
                             <Button Grid.Column="1" Content="×" Style="{StaticResource GhostButtonStyle}" Width="38" Height="38" FontSize="18" Click="DrawerClose_Click"/>
                         </Grid>
-                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="24,0,18,0">
+                        <ScrollViewer x:Name="DrawerScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="24,0,18,0">
                             <StackPanel x:Name="DrawerContent"/>
                         </ScrollViewer>
                         <Border Grid.Row="2" BorderBrush="{DynamicResource Border}" BorderThickness="0,1,0,0" Padding="20,16">
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                                 <Button x:Name="DrawerCancelButton" Content="关闭" MinWidth="88" Margin="0,0,8,0" Click="DrawerClose_Click"/>
+                                <Button x:Name="DrawerSecondaryButton" Content="次要操作" MinWidth="112" Margin="0,0,8,0" Click="DrawerSecondary_Click" Visibility="Collapsed"/>
                                 <Button x:Name="DrawerPrimaryButton" Content="确认" Style="{StaticResource PrimaryButtonStyle}" MinWidth="112" Click="DrawerPrimary_Click"/>
                             </StackPanel>
                         </Border>
                     </Grid>
                 </Border>
             </Grid>
-        </Grid>
-    </Border>
+            </Grid>
+        </Border>
+        <Border x:Name="WindowOutlineBorder" BorderBrush="{DynamicResource WindowBorder}" BorderThickness="1" CornerRadius="16" IsHitTestVisible="False" SnapsToDevicePixels="True"/>
+    </Grid>
 </Window>

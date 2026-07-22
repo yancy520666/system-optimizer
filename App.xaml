@@ -10,6 +10,7 @@
         <SolidColorBrush x:Key="Panel2" Color="#202126"/>
         <SolidColorBrush x:Key="Panel3" Color="#292A30"/>
         <SolidColorBrush x:Key="Border" Color="#34353C"/>
+        <SolidColorBrush x:Key="WindowBorder" Color="#5A5D66"/>
         <SolidColorBrush x:Key="Text" Color="#F5F5F7"/>
         <SolidColorBrush x:Key="Muted" Color="#A4A5AD"/>
         <SolidColorBrush x:Key="Blue" Color="#0A84FF"/>

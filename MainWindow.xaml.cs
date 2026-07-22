@@ -76,6 +76,8 @@ public partial class MainWindow : Window
         SourceInitialized += (_, _) => EnableModernWindowBackdrop();
         SizeChanged += (_, _) => UpdateResponsiveGrids();
         _settings = SettingsService.Load();
+        AppPaths.CleanupTransientCaches();
+        _drivers.ClearCache();
         _active = "系统优化";
         ApplyTheme();
         Loaded += async (_, _) =>
@@ -88,6 +90,10 @@ public partial class MainWindow : Window
         Closed += (_, _) =>
         {
             _shutdown.Cancel();
+            _pageCache.Clear();
+            _optimizer.InvalidateLiveStateCache();
+            _drivers.ClearCache();
+            AppPaths.CleanupTransientCaches();
             _settings.LastSelectedPage = "系统优化";
             SettingsService.Save(_settings);
             if (!_settings.KeepLocalComponents) AppPaths.CleanupRuntimeComponents();
@@ -96,7 +102,8 @@ public partial class MainWindow : Window
 
     private async Task WarmDriverCacheAsync()
     {
-        try { await _drivers.GetPageDataAsync(); }
+        try { await _drivers.GetPageDataAsync(forceRefresh: true, token: _shutdown.Token); }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
         catch (Exception ex) { LogService.Write($"驱动页后台预热失败：{ex.Message}"); }
     }
 
@@ -851,7 +858,7 @@ public partial class MainWindow : Window
         var loading = AddLoadingCard(_forceDriverRefresh && hasCached ? "正在后台刷新驱动状态，当前仍显示上次结果..." : _forceDriverRefresh ? "正在刷新驱动状态..." : "正在读取驱动状态...");
         try
         {
-            var data = await _drivers.GetPageDataAsync(_forceDriverRefresh);
+            var data = await _drivers.GetPageDataAsync(_forceDriverRefresh, _shutdown.Token);
             _forceDriverRefresh = false;
             if (renderVersion != _renderVersion || _active != "驱动管理") return;
             ContentPanel.Children.Clear();
@@ -871,7 +878,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var data = await _drivers.GetPageDataAsync(forceRefresh: true);
+            var data = await _drivers.GetPageDataAsync(forceRefresh: true, _shutdown.Token);
             if (renderVersion == _renderVersion && _active == "驱动管理")
             {
                 ContentPanel.Children.Clear();
@@ -997,6 +1004,8 @@ public partial class MainWindow : Window
                 {
                     var warning = tool.Id == "disableSecurityUpdate"
                         ? "该独立工具既能修改 Windows Update，也可能关闭 Defender 安全中心、更新服务和 Microsoft Store 依赖组件。它不属于 24 项优化、不使用 YAML，且不在本软件的全局恢复承诺内。"
+                        : tool.Id == "smartDns"
+                            ? "该工具会修改当前活动 IPv4 网络适配器的 DNS 设置，不属于本软件的全局恢复范围。需要恢复时，请在工具内选择“恢复 DHCP/路由器自动 DNS”。"
                         : "该工具由独立程序执行，可能修改系统设置，不属于本软件的全局恢复范围。";
                     OpenDrawer("高级工具确认", tool.Name, new TextBlock { Text = tool.Description + "\n\n" + warning, TextWrapping = TextWrapping.Wrap, LineHeight = 22 }, "确认启动", async () => await LaunchToolAsync(tool));
                     return;

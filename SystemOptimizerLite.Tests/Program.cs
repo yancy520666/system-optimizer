@@ -33,6 +33,45 @@ using var tools = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.Ba
 Assert(tools.RootElement.GetProperty("tools").TryGetProperty("disableSecurityUpdate", out var updateTool), "The advanced Windows Update tool must remain in the toolbox catalog.");
 Assert(updateTool.GetProperty("description").GetString()?.Contains("Defender", StringComparison.OrdinalIgnoreCase) == true, "The combined update/security tool must disclose Defender behavior.");
 Assert(updateTool.GetProperty("sha256").GetString()?.Length == 64, "The combined update/security tool must retain a pinned hash.");
+Assert(tools.RootElement.GetProperty("tools").TryGetProperty("smartDns", out var smartDnsManifest), "The smart DNS tool must be present in the toolbox catalog.");
+Assert(smartDnsManifest.GetProperty("assetName").GetString() == "smart-dns-switcher.bat", "The smart DNS release asset name is invalid.");
+Assert(smartDnsManifest.GetProperty("size").GetInt64() == 10784, "The smart DNS release asset size is invalid.");
+Assert(smartDnsManifest.GetProperty("sha256").GetString() == "D2431CBC67B0522626CDE6CA411277E5DCFE05174E9E675DCDF220E9BD218E00", "The smart DNS release asset hash is invalid.");
+Assert(smartDnsManifest.GetProperty("downloadUrl").GetString()?.EndsWith("/tools-v1/smart-dns-switcher.bat", StringComparison.Ordinal) == true, "The smart DNS release URL is invalid.");
+Assert(smartDnsManifest.GetProperty("description").GetString()?.Contains("恢复 DHCP", StringComparison.Ordinal) == true, "The smart DNS description must disclose DHCP restoration.");
+var smartDnsTool = (await new ToolboxService().GetToolsAsync()).Single(x => x.Id == "smartDns");
+Assert(smartDnsTool.Name == "智能选择DNS工具", "The smart DNS display name is invalid.");
+Assert(smartDnsTool.Dangerous, "The smart DNS tool must require the advanced-tool confirmation.");
+
+var cleanupRoot = Path.Combine(Path.GetTempPath(), "WindowsLite-cache-test-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var cacheFile = Path.Combine(cleanupRoot, "cache", "driver-status.json");
+    var optimizerLog = Path.Combine(cleanupRoot, "runtime", "optimizerNXT", "optimizerNXT-logs", "scan.log");
+    var retainedComponent = Path.Combine(cleanupRoot, "runtime", "optimizerNXT", "optimizerNXT.exe");
+    var runtimePartial = retainedComponent + ".download";
+    var legacyArchive = Path.Combine(cleanupRoot, "downloads", "BleachBit-6.0.2-portable.zip");
+    var downloadPartial = Path.Combine(cleanupRoot, "downloads", "driver.zip.download");
+    var retainedDriver = Path.Combine(cleanupRoot, "downloads", "verified-driver.exe");
+    var retainedSettings = Path.Combine(cleanupRoot, "settings.json");
+    var retainedLog = Path.Combine(cleanupRoot, "logs", "today.log");
+    var retainedBackup = Path.Combine(cleanupRoot, "rollback-backups", "snapshot.json");
+    foreach (var file in new[] { cacheFile, optimizerLog, retainedComponent, runtimePartial, legacyArchive, downloadPartial, retainedDriver, retainedSettings, retainedLog, retainedBackup })
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        File.WriteAllText(file, "test");
+    }
+
+    AppPaths.CleanupTransientCaches(cleanupRoot);
+    Assert(!Directory.Exists(Path.Combine(cleanupRoot, "cache")), "The transient cache directory must be removed.");
+    Assert(!File.Exists(optimizerLog) && !File.Exists(runtimePartial) && !File.Exists(legacyArchive) && !File.Exists(downloadPartial), "Transient component artifacts must be removed.");
+    Assert(File.Exists(retainedComponent) && File.Exists(retainedDriver), "Installed components and verified driver packages must be retained.");
+    Assert(File.Exists(retainedSettings) && File.Exists(retainedLog) && File.Exists(retainedBackup), "Settings, logs, and rollback data must be retained.");
+}
+finally
+{
+    AppPaths.SafeDeleteDirectory(cleanupRoot);
+}
 
 var aggregate = typeof(OptimizerService).GetMethod("AggregateTargetStates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 OptimizationLiveState Aggregate(params OptimizationTargetState[] states) => (OptimizationLiveState)aggregate.Invoke(null, new object[] { states })!;

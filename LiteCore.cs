@@ -294,6 +294,7 @@ public static class AppPaths
     public static readonly string ReportRoot = Path.Combine(LocalAppData, "rollback-reports");
     public static readonly string LogRoot = Path.Combine(LocalAppData, "logs");
     public static readonly string CacheRoot = Path.Combine(LocalAppData, "cache");
+    public static readonly string TransientRoot = Path.Combine(CacheRoot, "transient");
     public static readonly string DriverCachePath = Path.Combine(CacheRoot, "driver-status.json");
 
     public static string DataFile(string name) => Path.Combine(AppContext.BaseDirectory, "Data", name);
@@ -309,9 +310,55 @@ public static class AppPaths
 
     public static void CleanupRuntimeComponents()
     {
-        foreach (var path in new[] { OptimizerRuntime, CleanerRuntime, ToolRuntime, Downloads })
+        foreach (var path in new[] { OptimizerRuntime, CleanerRuntime, ToolRuntime })
         {
             SafeDeleteDirectory(path);
+        }
+    }
+
+    public static void CleanupTransientCaches(string? localAppDataOverride = null)
+    {
+        var root = string.IsNullOrWhiteSpace(localAppDataOverride) ? LocalAppData : Path.GetFullPath(localAppDataOverride);
+        var cache = Path.Combine(root, "cache");
+        var runtime = Path.Combine(root, "runtime");
+        var downloads = Path.Combine(root, "downloads");
+
+        SafeDeleteDirectory(cache);
+        SafeDeleteDirectory(Path.Combine(runtime, "optimizerNXT", "optimizerNXT-logs"));
+        SafeDeleteFile(Path.Combine(downloads, "BleachBit-6.0.2-portable.zip"));
+        DeleteFilesByPattern(runtime, "*.download");
+        DeleteFilesByPattern(runtime, "*.tmp");
+        DeleteFilesByPattern(downloads, "*.download");
+        DeleteFilesByPattern(downloads, "*.tmp");
+    }
+
+    public static bool SafeDeleteFile(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return true;
+            File.SetAttributes(path, FileAttributes.Normal);
+            File.Delete(path);
+            return true;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            LogService.Write($"临时文件清理跳过：{path} - {ex.Message}");
+            return false;
+        }
+    }
+
+    private static void DeleteFilesByPattern(string root, string pattern)
+    {
+        if (!Directory.Exists(root)) return;
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
+                SafeDeleteFile(file);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            LogService.Write($"临时文件扫描跳过：{root} - {ex.Message}");
         }
     }
 
@@ -2157,6 +2204,7 @@ public sealed class CleanerService
     public async Task InstallAsync(CancellationToken token, Action<string>? status = null, bool force = false)
     {
         if (Interlocked.Exchange(ref _installing, 1) == 1) return;
+        var zip = Path.Combine(AppPaths.TransientRoot, "BleachBit-6.0.2-portable.zip");
         try
         {
             if (IsInstalled() && !force)
@@ -2166,8 +2214,7 @@ public sealed class CleanerService
             }
             AppPaths.Ensure();
             using var dl = new DownloadService();
-            Directory.CreateDirectory(AppPaths.Downloads);
-            var zip = Path.Combine(AppPaths.Downloads, "BleachBit-6.0.2-portable.zip");
+            Directory.CreateDirectory(AppPaths.TransientRoot);
             if (force)
             {
                 _installMessage = "正在替换 BleachBit 组件";
@@ -2195,6 +2242,7 @@ public sealed class CleanerService
         }
         finally
         {
+            AppPaths.SafeDeleteFile(zip);
             _installMessage = "";
             Interlocked.Exchange(ref _installing, 0);
         }
@@ -2665,7 +2713,7 @@ public sealed class ToolboxService
     }
 
     private static string StandardLocalPath(ToolItem item) => Path.Combine(AppPaths.ToolRuntime, string.IsNullOrWhiteSpace(item.AssetName) ? item.Id : item.AssetName);
-    private static bool Dangerous(string id) => id.Contains("activation", StringComparison.OrdinalIgnoreCase) || id.Contains("disable", StringComparison.OrdinalIgnoreCase) || id.Contains("visualFix", StringComparison.OrdinalIgnoreCase) || id.Contains("Hijack", StringComparison.OrdinalIgnoreCase);
+    private static bool Dangerous(string id) => id.Contains("activation", StringComparison.OrdinalIgnoreCase) || id.Contains("disable", StringComparison.OrdinalIgnoreCase) || id.Contains("visualFix", StringComparison.OrdinalIgnoreCase) || id.Contains("Hijack", StringComparison.OrdinalIgnoreCase) || id.Equals("smartDns", StringComparison.OrdinalIgnoreCase);
     private static int ToolOrder(string id) => id switch
     {
         "activation" => 30,
@@ -2680,6 +2728,7 @@ public sealed class ToolboxService
         "disableCoreIsolation" => 52,
         "geekUninstaller" => 70,
         "browserHijackClean" => 90,
+        "smartDns" => 95,
         "visualFix" => 100,
         _ => 999
     };
@@ -2698,6 +2747,7 @@ public sealed class ToolboxService
         "oneKeyActivate" => "命令行工具激活 Windows",
         "archiveTool" => "rar备用解压工具",
         "visualFix" => "Win11 视觉修复",
+        "smartDns" => "智能选择DNS工具",
         _ => id
     };
     private static string ToolDescription(string id) => id switch
@@ -2706,6 +2756,7 @@ public sealed class ToolboxService
         "driverToolVip" => "辅助安装常用硬件驱动。",
         "browserHijackClean" => "清理重装系统后的浏览器劫持项。",
         "visualFix" => "尝试修复 Windows 11 视觉显示异常。",
+        "smartDns" => "智能测速并切换 IPv4 DNS，支持恢复 DHCP 自动配置。",
         _ => "从固定 GitHub 工具仓库按需下载并启动。"
     };
 }
@@ -2718,15 +2769,18 @@ public sealed class DriverService
     private DriverPageData? _pageCache;
     private DateTimeOffset _pageCacheAt;
     private Task<DriverPageData>? _pageRefresh;
+    private int _cacheGeneration;
 
     public void ClearCache()
     {
         lock (_pageCacheSync)
         {
+            _cacheGeneration++;
             _pageCache = null;
             _pageCacheAt = default;
+            _pageRefresh = null;
         }
-        try { if (File.Exists(AppPaths.DriverCachePath)) File.Delete(AppPaths.DriverCachePath); } catch { }
+        AppPaths.SafeDeleteFile(AppPaths.DriverCachePath);
     }
 
     public bool TryGetPageCache(out DriverPageData? data, out bool stale)
@@ -2739,13 +2793,16 @@ public sealed class DriverService
         }
     }
 
-    public async Task<DriverPageData> GetPageDataAsync(bool forceRefresh = false)
+    public async Task<DriverPageData> GetPageDataAsync(bool forceRefresh = false, CancellationToken token = default)
     {
+        token.ThrowIfCancellationRequested();
         Task<DriverPageData> refreshTask;
+        int generation;
         lock (_pageCacheSync)
         {
             if (!forceRefresh && _pageCache != null && DateTimeOffset.Now - _pageCacheAt < TimeSpan.FromMinutes(30)) return _pageCache;
-            _pageRefresh ??= LoadPageDataAsync(forceRefresh);
+            generation = _cacheGeneration;
+            _pageRefresh ??= LoadPageDataAsync(forceRefresh, token, generation);
             refreshTask = _pageRefresh;
         }
         try
@@ -2753,8 +2810,11 @@ public sealed class DriverService
             var data = await refreshTask;
             lock (_pageCacheSync)
             {
-                _pageCache = data;
-                _pageCacheAt = DateTimeOffset.Now;
+                if (generation == _cacheGeneration && !token.IsCancellationRequested)
+                {
+                    _pageCache = data;
+                    _pageCacheAt = DateTimeOffset.Now;
+                }
             }
             return data;
         }
@@ -2767,10 +2827,10 @@ public sealed class DriverService
         }
     }
 
-    private async Task<DriverPageData> LoadPageDataAsync(bool forceRefresh)
+    private async Task<DriverPageData> LoadPageDataAsync(bool forceRefresh, CancellationToken token, int generation)
     {
         AppPaths.Ensure();
-        var detected = await DetectDetailedAsync();
+        var detected = await DetectDetailedAsync(token);
         List<DriverStatusItem>? drivers = null;
         var cachedAt = DateTimeOffset.Now;
         if (!forceRefresh && File.Exists(AppPaths.DriverCachePath))
@@ -2790,16 +2850,21 @@ public sealed class DriverService
         }
         if (drivers == null)
         {
-            drivers = await GetDriverStatusAsync();
+            drivers = await GetDriverStatusAsync(token);
             cachedAt = DateTimeOffset.Now;
-            AtomicFile.Write(AppPaths.DriverCachePath, JsonSerializer.Serialize(new DriverStatusCache(drivers, cachedAt), JsonOptions));
+            lock (_pageCacheSync)
+            {
+                token.ThrowIfCancellationRequested();
+                if (generation == _cacheGeneration)
+                    AtomicFile.Write(AppPaths.DriverCachePath, JsonSerializer.Serialize(new DriverStatusCache(drivers, cachedAt), JsonOptions));
+            }
         }
         return new DriverPageData(detected.Info, detected.Assessment, drivers, cachedAt);
     }
 
-    public async Task<DeviceMatchInfo> DetectAsync() => (await DetectDetailedAsync()).Info;
+    public async Task<DeviceMatchInfo> DetectAsync(CancellationToken token = default) => (await DetectDetailedAsync(token)).Info;
 
-    private async Task<(DeviceMatchInfo Info, DeviceIdentityAssessment Assessment)> DetectDetailedAsync()
+    private async Task<(DeviceMatchInfo Info, DeviceIdentityAssessment Assessment)> DetectDetailedAsync(CancellationToken token)
     {
         using var device = await PowerShellJsonAsync("""
 $cs = Get-CimInstance Win32_ComputerSystem
@@ -2823,7 +2888,7 @@ $chassis = Get-CimInstance Win32_SystemEnclosure | Select-Object -First 1
   BaseBoardSerialNumber=$board.SerialNumber
   ChassisSerialNumber=$chassis.SerialNumber
 } | ConvertTo-Json -Compress
-""");
+""", token);
         var root = device.RootElement;
         var identity = new DeviceIdentity(
             root.S("BiosManufacturer"),
@@ -2909,7 +2974,7 @@ $chassis = Get-CimInstance Win32_SystemEnclosure | Select-Object -First 1
         return target;
     }
 
-    public async Task<List<DriverStatusItem>> GetDriverStatusAsync()
+    public async Task<List<DriverStatusItem>> GetDriverStatusAsync(CancellationToken token = default)
     {
         using var doc = await PowerShellJsonAsync("""
 $signed = @{}
@@ -2924,7 +2989,7 @@ Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -and $_.PNPClass -in @(
     ErrorCode=$_.ConfigManagerErrorCode
   }
 } | ConvertTo-Json -Compress
-""");
+""", token);
         var list = new List<DriverStatusItem>();
         var root = doc.RootElement;
         var elements = root.ValueKind == JsonValueKind.Array ? root.EnumerateArray().ToList() : root.ValueKind == JsonValueKind.Object ? new List<JsonElement> { root } : new();
@@ -2995,6 +3060,11 @@ Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -and $_.PNPClass -in @(
         {
             try { process.Kill(true); } catch { }
             throw new TimeoutException("设备信息读取超过 25 秒，已停止本次检测。");
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(true); } catch { }
+            throw;
         }
         var output = await outputTask;
         var error = await errorTask;

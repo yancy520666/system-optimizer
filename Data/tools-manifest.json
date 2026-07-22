@@ -119,6 +119,15 @@
       "downloadUrl": "https://raw.githubusercontent.com/yancy520666/system-toolkit-tools/41f0a5dd0dde9f34b810d5459cb4ca7cca1a3e75/tools-v1/win11-visual-fix.bat",
       "assetName": "win11-visual-fix.bat",
       "aliases": ["win11-visual-fix.bat", "一键修复Win11视觉体验.bat"]
+    },
+    "smartDns": {
+      "version": "local",
+      "description": "对当前 IPv4 网络的多家公共 DNS 进行解析测速，并智能切换低延迟、稳定的 DNS；支持恢复 DHCP，可缓解因 DNS 解析异常导致的部分连接超时。",
+      "size": 10784,
+      "sha256": "D2431CBC67B0522626CDE6CA411277E5DCFE05174E9E675DCDF220E9BD218E00",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/smart-dns-switcher.bat",
+      "assetName": "smart-dns-switcher.bat",
+      "aliases": ["智能DNS切换工具.bat"]
     }
   }
 }

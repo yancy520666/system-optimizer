@@ -4,23 +4,24 @@
              xmlns:primitives="clr-namespace:System.Windows.Controls.Primitives;assembly=PresentationFramework"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-        <SolidColorBrush x:Key="Bg" Color="#050B12"/>
-        <SolidColorBrush x:Key="Sidebar" Color="#07111C"/>
-        <SolidColorBrush x:Key="Panel" Color="#0D1723"/>
-        <SolidColorBrush x:Key="Panel2" Color="#121F2D"/>
-        <SolidColorBrush x:Key="Panel3" Color="#17283A"/>
-        <SolidColorBrush x:Key="Border" Color="#223445"/>
-        <SolidColorBrush x:Key="Text" Color="#F1F6FF"/>
-        <SolidColorBrush x:Key="Muted" Color="#98A8BB"/>
-        <SolidColorBrush x:Key="Blue" Color="#2D7DFF"/>
-        <SolidColorBrush x:Key="BlueSoft" Color="#113566"/>
-        <SolidColorBrush x:Key="Green" Color="#31D07A"/>
-        <SolidColorBrush x:Key="Red" Color="#FF6470"/>
-        <SolidColorBrush x:Key="Yellow" Color="#F4C95D"/>
+        <SolidColorBrush x:Key="Bg" Color="#101114"/>
+        <SolidColorBrush x:Key="Sidebar" Color="#15161A"/>
+        <SolidColorBrush x:Key="Panel" Color="#1A1B20"/>
+        <SolidColorBrush x:Key="Panel2" Color="#202126"/>
+        <SolidColorBrush x:Key="Panel3" Color="#292A30"/>
+        <SolidColorBrush x:Key="Border" Color="#34353C"/>
+        <SolidColorBrush x:Key="WindowBorder" Color="#5A5D66"/>
+        <SolidColorBrush x:Key="Text" Color="#F5F5F7"/>
+        <SolidColorBrush x:Key="Muted" Color="#A4A5AD"/>
+        <SolidColorBrush x:Key="Blue" Color="#0A84FF"/>
+        <SolidColorBrush x:Key="BlueSoft" Color="#193653"/>
+        <SolidColorBrush x:Key="Green" Color="#30D158"/>
+        <SolidColorBrush x:Key="Red" Color="#FF453A"/>
+        <SolidColorBrush x:Key="Yellow" Color="#FFD60A"/>
 
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{DynamicResource Text}"/>
-            <Setter Property="FontFamily" Value="Microsoft YaHei UI"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable Text, Microsoft YaHei UI"/>
         </Style>
 
         <Style TargetType="Button">
@@ -28,9 +29,11 @@
             <Setter Property="Background" Value="{DynamicResource Panel2}"/>
             <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="12,8"/>
+            <Setter Property="Padding" Value="14,8"/>
+            <Setter Property="MinHeight" Value="36"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="FontFamily" Value="Microsoft YaHei UI"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -38,8 +41,8 @@
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="8">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                CornerRadius="10">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -56,6 +59,25 @@
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+        </Style>
+
+        <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="{DynamicResource Blue}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Blue}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <Style x:Key="GhostButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+        </Style>
+
+        <Style x:Key="DangerButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="{DynamicResource Red}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Red}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
         </Style>
 
         <Style TargetType="ToolTip">
@@ -198,15 +220,34 @@
         </Style>
 
         <Style TargetType="ScrollBar">
-            <Setter Property="Background" Value="{DynamicResource Bg}"/>
-            <Setter Property="Foreground" Value="{DynamicResource Panel3}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
-            <Setter Property="Width" Value="12"/>
-        </Style>
-
-        <Style TargetType="{x:Type primitives:Thumb}">
-            <Setter Property="Background" Value="{DynamicResource Panel3}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Width" Value="8"/>
+            <Setter Property="MinWidth" Value="8"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid Background="Transparent">
+                            <Track x:Name="PART_Track" Orientation="{TemplateBinding Orientation}" IsDirectionReversed="True" Focusable="False">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="{x:Static ScrollBar.PageUpCommand}" Opacity="0" Focusable="False"/>
+                                </Track.DecreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Background="{DynamicResource Border}" MinHeight="34">
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border Background="{TemplateBinding Background}" CornerRadius="4" Margin="1"/>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="{x:Static ScrollBar.PageDownCommand}" Opacity="0" Focusable="False"/>
+                                </Track.IncreaseRepeatButton>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </Application.Resources>
 </Application>

@@ -41,7 +41,7 @@
     },
     "disableSecurityUpdate": {
       "version": "local",
-      "description": "关闭 Defender 安全中心和 Windows 自动更新，请注意终结 Windows Update 组件会导致微软商店等功能异常，建议选择禁用选项！",
+      "description": "独立的 Windows 更新与安全设置工具，可修改 Windows Update、Defender 安全中心及相关服务。终止更新组件可能影响 Microsoft Store，请仅在了解后果时使用。",
       "size": 522552,
       "sha256": "89835ACC8E83DC7EFAB5B4DF6066E3B4258D37720B02262A95C02DE256A5BD7A",
       "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/disable-security-update.exe",
@@ -88,7 +88,7 @@
       "version": "local",
       "description": "清理浏览器主页、搜索和快捷方式劫持项，适合重装系统后浏览器被篡改时使用。",
       "size": 11306,
-      "sha256": "05F2B3BDD9C762E967FA71A1581B2806D77548762789C493CCF6205B35A1D672",
+      "sha256": "CC1258DF21578334ABB5C59C439CA2C6D2E59485BE4794138715BCA9EE5B2FC8",
       "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/browser-hijack-clean.bat",
       "assetName": "browser-hijack-clean.bat",
       "aliases": ["一键清理重装后的浏览器劫持.bat"]
@@ -119,6 +119,15 @@
       "downloadUrl": "https://raw.githubusercontent.com/yancy520666/system-toolkit-tools/41f0a5dd0dde9f34b810d5459cb4ca7cca1a3e75/tools-v1/win11-visual-fix.bat",
       "assetName": "win11-visual-fix.bat",
       "aliases": ["win11-visual-fix.bat", "一键修复Win11视觉体验.bat"]
+    },
+    "smartDns": {
+      "version": "local",
+      "description": "对当前 IPv4 网络的多家公共 DNS 进行解析测速，并智能切换低延迟、稳定的 DNS；支持恢复 DHCP，可缓解因 DNS 解析异常导致的部分连接超时。",
+      "size": 10784,
+      "sha256": "D2431CBC67B0522626CDE6CA411277E5DCFE05174E9E675DCDF220E9BD218E00",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/smart-dns-switcher.bat",
+      "assetName": "smart-dns-switcher.bat",
+      "aliases": ["智能DNS切换工具.bat"]
     }
   }
 }

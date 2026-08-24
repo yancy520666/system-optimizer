@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private readonly CleanerService _cleaner = new();
     private readonly DriverService _drivers = new();
     private readonly ToolboxService _toolbox = new();
+    private readonly UpdateService _updates = new();
     private readonly CancellationTokenSource _shutdown = new();
     private readonly HashSet<string> _selectedCleanerIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _busyOptimizerIds = new(StringComparer.OrdinalIgnoreCase);
@@ -49,6 +50,7 @@ public partial class MainWindow : Window
     private bool _optimizerComponentBusy;
     private bool _cleanerComponentBusy;
     private bool _cleanerRunBusy;
+    private AppUpdateInfo? _availableUpdate;
     private DownloadFailure? _lastDownloadFailure;
     private const string HelpDocumentUrl = "https://yangg-app.notion.site/system-optimizer-help?source=copy_link";
     private const string ManualDownloadUrl = "https://yangg-app.notion.site/system-optimizer-tools-download?source=copy_link";
@@ -100,6 +102,7 @@ public partial class MainWindow : Window
         };
         StateChanged += (_, _) => ApplyWindowRegion();
         _settings = SettingsService.Load();
+        AppPaths.RestoreBundledRuntimeComponents();
         try { CleanerService.RecoverInterruptedInstallation(); }
         catch (Exception ex) { LogService.Write($"BleachBit 中断安装恢复失败：{ex.Message}"); }
         AppPaths.CleanupTransientCaches();
@@ -110,6 +113,7 @@ public partial class MainWindow : Window
         {
             RenderNav();
             await RefreshTopStatusAsync();
+            _ = CheckForUpdateAsync();
             await SelectPageAsync(_active);
             _ = WarmDriverCacheAsync();
         };
@@ -117,6 +121,7 @@ public partial class MainWindow : Window
         {
             if (_windowSource != null) _windowSource.RemoveHook(WindowMessageHook);
             _shutdown.Cancel();
+            _updates.Dispose();
             _pageCache.Clear();
             _optimizer.InvalidateLiveStateCache();
             _drivers.ClearCache();
@@ -132,6 +137,20 @@ public partial class MainWindow : Window
         try { await _drivers.GetPageDataAsync(forceRefresh: true, token: _shutdown.Token); }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
         catch (Exception ex) { LogService.Write($"驱动页后台预热失败：{ex.Message}"); }
+    }
+
+    private async Task CheckForUpdateAsync()
+    {
+        try
+        {
+            var update = await _updates.CheckForUpdateAsync(_shutdown.Token);
+            if (_shutdown.IsCancellationRequested) return;
+            _availableUpdate = update;
+            if (update != null) await RefreshTopStatusAsync();
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        {
+        }
     }
 
     private void RenderNav()
@@ -324,6 +343,7 @@ public partial class MainWindow : Window
             AddStatusChip(cleaner.State == ComponentState.Online ? "BleachBit 在线" : cleaner.State == ComponentState.Downloading ? "获取远端服务中" : "BleachBit 离线",
                 cleaner.State == ComponentState.Online ? "Green" : cleaner.State == ComponentState.Downloading ? "Yellow" : "Red");
         }
+        if (_availableUpdate != null) AddUpdateChip(_availableUpdate);
     }
 
     private void AddStatusChip(string text, string colorKey)
@@ -342,6 +362,88 @@ public partial class MainWindow : Window
         row.Children.Add(new TextBlock { Text = text, FontSize = 12, VerticalAlignment = VerticalAlignment.Center });
         border.Child = row;
         TopStatusPanel.Children.Add(border);
+    }
+
+    private void AddUpdateChip(AppUpdateInfo update)
+    {
+        var button = new Button
+        {
+            Style = (Style)FindResource("UpdateChipButtonStyle"),
+            Padding = new Thickness(0),
+            Margin = new Thickness(0),
+            Focusable = false,
+            Cursor = Cursors.Hand,
+            ToolTip = $"发现新版本 {update.Latest.DisplayVersion}"
+        };
+        System.Windows.Automation.AutomationProperties.SetName(button, $"发现新版本 {update.Latest.DisplayVersion}，点击查看下载");
+        WindowChrome.SetIsHitTestVisibleInChrome(button, true);
+        button.Click += (_, _) => ShowUpdateDrawer(update);
+
+        var chip = new Border
+        {
+            Background = BrushOf("Panel2"),
+            BorderBrush = BrushOf("Border"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(10, 5, 10, 5),
+            Margin = new Thickness(0, 0, 8, 0)
+        };
+        button.MouseEnter += (_, _) =>
+        {
+            chip.BorderBrush = BrushOf("Blue");
+            chip.Background = BrushOf("BlueSoft");
+        };
+        button.MouseLeave += (_, _) =>
+        {
+            chip.BorderBrush = BrushOf("Border");
+            chip.Background = BrushOf("Panel2");
+        };
+        // A filled update badge keeps the upgrade affordance distinct from the
+        // surrounding card border and avoids looking like a focused control.
+        var icon = new Canvas { Width = 22, Height = 22, VerticalAlignment = VerticalAlignment.Center };
+        icon.Children.Add(new Ellipse
+        {
+            Width = 22,
+            Height = 22,
+            Fill = BrushOf("Blue")
+        });
+        icon.Children.Add(new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M10,16 L10,10.2 L7.4,12.8 L6,11.4 L11,6.4 L16,11.4 L14.6,12.8 L12,10.2 L12,16 Z"),
+            Fill = Brushes.White,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            StrokeLineJoin = PenLineJoin.Round
+        });
+        chip.Child = icon;
+        button.Content = chip;
+        TopStatusPanel.Children.Add(button);
+    }
+
+    private void ShowUpdateDrawer(AppUpdateInfo update)
+    {
+        var content = new StackPanel();
+        content.Children.Add(new Border
+        {
+            Background = BrushOf("BlueSoft"),
+            CornerRadius = new CornerRadius(14),
+            Padding = new Thickness(16),
+            Margin = new Thickness(0, 0, 0, 18),
+            Child = new TextBlock
+            {
+                Text = "GitHub 上已有可用的新版本。前往 Release 页面后，可选择轻量版或离线版下载。软件不会自动下载、覆盖或重启。",
+                TextWrapping = TextWrapping.Wrap,
+                LineHeight = 21
+            }
+        });
+        content.Children.Add(AboutLine("当前版本", update.Current.DisplayVersion));
+        content.Children.Add(AboutLine("最新版本", update.Latest.DisplayVersion));
+        content.Children.Add(AboutLine("发布时间", update.Latest.ReleasedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
+        OpenDrawer("发现新版本", "GitHub Release 更新提醒", content, "前往下载", async () =>
+        {
+            await CloseDrawerAsync();
+            Process.Start(new ProcessStartInfo(UpdateService.LatestReleasePageUrl) { UseShellExecute = true });
+        });
     }
 
     private async Task RenderOptimizerAsync(int renderVersion)
@@ -1135,6 +1237,8 @@ public partial class MainWindow : Window
                         ? "该独立工具既能修改 Windows Update，也可能关闭 Defender 安全中心、更新服务和 Microsoft Store 依赖组件。它不属于 24 项优化、不使用 YAML，且不在本软件的全局恢复承诺内。"
                         : tool.Id == "smartDns"
                             ? "该工具会修改当前活动 IPv4 网络适配器的 DNS 设置，不属于本软件的全局恢复范围。需要恢复时，请在工具内选择“恢复 DHCP/路由器自动 DNS”。"
+                            : tool.Id == "gameRuntimeHealth"
+                                ? "该工具会在选择修复时下载 Microsoft DirectX 官方组件、启用 Windows 可选功能或执行 DISM/SFC 系统修复。它不属于本软件的全局恢复范围，请先查看检测报告并确认影响。"
                         : "该工具由独立程序执行，可能修改系统设置，不属于本软件的全局恢复范围。";
                     OpenDrawer("高级工具确认", tool.Name, new TextBlock { Text = tool.Description + "\n\n" + warning, TextWrapping = TextWrapping.Wrap, LineHeight = 22 }, "确认启动", async () => await LaunchToolAsync(tool));
                     return;
@@ -2233,7 +2337,7 @@ public partial class MainWindow : Window
         var panel = new StackPanel { Margin = new Thickness(26) };
         panel.Children.Add(new TextBlock { Text = "系统优化工具", FontSize = 30, FontWeight = FontWeights.Bold });
         panel.Children.Add(new TextBlock { Text = "Windows 本地优化、运行环境修复与驱动维护工具", Foreground = BrushOf("Muted"), FontSize = 16, Margin = new Thickness(0, 12, 0, 18) });
-        panel.Children.Add(AboutLine("软件版本", "V3.1"));
+        panel.Children.Add(AboutLine("软件版本", "V3.3"));
         panel.Children.Add(AboutLine("组件状态", status.State == ComponentState.Online ? $"OptimizerNXT {OptimizerService.PinnedVersion} · YAML {status.ReadyCount}/{status.TotalCount}" : "OptimizerNXT 未就绪"));
         panel.Children.Add(AboutLine("软件作者", "Yangg"));
         panel.Children.Add(AboutLine("适用系统", "Windows 10 / Windows 11"));

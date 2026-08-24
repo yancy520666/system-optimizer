@@ -73,6 +73,22 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="UpdateChipButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style x:Key="MoreMenuItemStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
             <Setter Property="Height" Value="44"/>
             <Setter Property="MinHeight" Value="44"/>
@@ -102,7 +118,7 @@
                             </Border>
                             <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
                                 <TextBlock Text="Windows Lite" FontSize="16" FontWeight="SemiBold"/>
-                                <TextBlock Text="System Optimizer v3.1" Foreground="{DynamicResource Muted}" FontSize="11" Margin="0,2,0,0"/>
+                                <TextBlock Text="System Optimizer v3.3" Foreground="{DynamicResource Muted}" FontSize="11" Margin="0,2,0,0"/>
                             </StackPanel>
                         </StackPanel>
                     </StackPanel>

@@ -27,6 +27,9 @@ static HttpResponseMessage PartialResponse(byte[] bytes, long from, long to, lon
     return response;
 }
 
+static string UpdateManifest(string version, string revision, string releasedAt = "2026-08-04T00:00:00Z") =>
+    JsonSerializer.Serialize(new { schemaVersion = 1, version, revision, releasedAt });
+
 static void CreateCleanerFixture(string root, int xmlCount = 60, bool includeExe = true, bool includeCleanerDirectory = true)
 {
     var portable = Path.Combine(root, "BleachBit-Portable");
@@ -254,13 +257,76 @@ Assert(updateTool.GetProperty("description").GetString()?.Contains("Defender", S
 Assert(updateTool.GetProperty("sha256").GetString()?.Length == 64, "The combined update/security tool must retain a pinned hash.");
 Assert(tools.RootElement.GetProperty("tools").TryGetProperty("smartDns", out var smartDnsManifest), "The smart DNS tool must be present in the toolbox catalog.");
 Assert(smartDnsManifest.GetProperty("assetName").GetString() == "smart-dns-switcher.bat", "The smart DNS release asset name is invalid.");
-Assert(smartDnsManifest.GetProperty("size").GetInt64() == 10784, "The smart DNS release asset size is invalid.");
-Assert(smartDnsManifest.GetProperty("sha256").GetString() == "D2431CBC67B0522626CDE6CA411277E5DCFE05174E9E675DCDF220E9BD218E00", "The smart DNS release asset hash is invalid.");
+Assert(smartDnsManifest.GetProperty("size").GetInt64() == 25716, "The smart DNS release asset size is invalid.");
+Assert(smartDnsManifest.GetProperty("sha256").GetString() == "DE83CBD5B0845D212F6B2A40DCB63F8949D2BDEF92362608C803ACEC89D173EB", "The smart DNS release asset hash is invalid.");
 Assert(smartDnsManifest.GetProperty("downloadUrl").GetString()?.EndsWith("/tools-v1/smart-dns-switcher.bat", StringComparison.Ordinal) == true, "The smart DNS release URL is invalid.");
 Assert(smartDnsManifest.GetProperty("description").GetString()?.Contains("恢复 DHCP", StringComparison.Ordinal) == true, "The smart DNS description must disclose DHCP restoration.");
-var smartDnsTool = (await new ToolboxService().GetToolsAsync()).Single(x => x.Id == "smartDns");
+Assert(tools.RootElement.GetProperty("tools").TryGetProperty("browserHijackClean", out var browserHijackManifest), "The browser hijack cleanup tool must be present in the toolbox catalog.");
+Assert(browserHijackManifest.GetProperty("assetName").GetString() == "browser-hijack-clean.bat", "The browser hijack cleanup asset name is invalid.");
+Assert(browserHijackManifest.GetProperty("size").GetInt64() == 11238, "The browser hijack cleanup release asset size is invalid.");
+Assert(browserHijackManifest.GetProperty("sha256").GetString() == "4E936BD953DD10715B24C7F321927026926590C873B14726020C0E268F0738BA", "The browser hijack cleanup release asset hash is invalid.");
+Assert(tools.RootElement.GetProperty("tools").TryGetProperty("gameRuntimeHealth", out var gameRuntimeManifest), "The game runtime health tool must be present in the toolbox catalog.");
+Assert(gameRuntimeManifest.GetProperty("assetName").GetString() == "GameRuntimeHealth.bat", "The game runtime health release asset name is invalid.");
+Assert(gameRuntimeManifest.GetProperty("size").GetInt64() == 85642, "The game runtime health release asset size is invalid.");
+Assert(gameRuntimeManifest.GetProperty("sha256").GetString() == "F33EA553913431A5050265CB2D656EFBF671F23EB240CE022E2C9B5EB69190DD", "The game runtime health release asset hash is invalid.");
+Assert(gameRuntimeManifest.GetProperty("downloadUrl").GetString()?.EndsWith("/tools-v1/GameRuntimeHealth.bat", StringComparison.Ordinal) == true, "The game runtime health release URL is invalid.");
+Assert(gameRuntimeManifest.GetProperty("aliases").EnumerateArray().Any(x => x.GetString() == "游戏运行环境检测与安全修复工具.bat"), "The game runtime health tool must support the Chinese legacy filename.");
+var toolboxTools = await new ToolboxService().GetToolsAsync();
+var smartDnsTool = toolboxTools.Single(x => x.Id == "smartDns");
 Assert(smartDnsTool.Name == "智能选择DNS工具", "The smart DNS display name is invalid.");
 Assert(smartDnsTool.Dangerous, "The smart DNS tool must require the advanced-tool confirmation.");
+var gameRuntimeTool = toolboxTools.Single(x => x.Id == "gameRuntimeHealth");
+Assert(gameRuntimeTool.Name == "游戏运行环境检测与安全修复工具", "The game runtime health display name is invalid.");
+Assert(gameRuntimeTool.Dangerous, "The game runtime health tool must require the advanced-tool confirmation.");
+var candidateNames = ((IEnumerable<string>)typeof(ToolboxService).GetMethod("CandidateNames", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.Invoke(null, new object[] { gameRuntimeTool })!).ToList();
+Assert(candidateNames.Contains("GameRuntimeHealth.bat") && candidateNames.Contains("游戏运行环境检测与安全修复工具.bat"), "The game runtime health tool must resolve both English and Chinese filenames.");
+var toolboxOrder = toolboxTools.Select(x => x.Id).ToList();
+Assert(toolboxOrder.IndexOf("disableCoreIsolation") < toolboxOrder.IndexOf("gameRuntimeHealth")
+    && toolboxOrder.IndexOf("gameRuntimeHealth") < toolboxOrder.IndexOf("smartDns")
+    && toolboxOrder.IndexOf("smartDns") < toolboxOrder.IndexOf("browserHijackClean")
+    && toolboxOrder.IndexOf("browserHijackClean") < toolboxOrder.IndexOf("visualFix")
+    && toolboxOrder.IndexOf("visualFix") < toolboxOrder.IndexOf("geekUninstaller")
+    && toolboxOrder.IndexOf("geekUninstaller") < toolboxOrder.IndexOf("sevenZip"), "The toolbox card order must place game runtime and DNS tools before browser cleanup, visual repair, Geek, and 7-Zip.");
+
+var bundledRelease = UpdateService.LoadBundledReleaseInfo();
+Assert(bundledRelease.Version == "3.3.0" && bundledRelease.Revision == "2026-08-04-v3.3.0-1", "The bundled update manifest is invalid.");
+var newerRelease = UpdateService.ParseManifest(UpdateManifest("3.4.0", "2026-08-10-v3.4.0-1"));
+var silentRelease = UpdateService.ParseManifest(UpdateManifest("3.3.0", "2026-08-05-v3.3.0-2"));
+var sameRelease = UpdateService.ParseManifest(UpdateManifest("3.3.0", "2026-08-04-v3.3.0-1"));
+var olderRelease = UpdateService.ParseManifest(UpdateManifest("3.2.0", "2026-08-10-v3.2.0-9"));
+Assert(UpdateService.IsUpdateAvailable(bundledRelease, newerRelease), "A newer stable version must be reported as an update.");
+Assert(UpdateService.IsUpdateAvailable(bundledRelease, silentRelease), "A changed revision with the same version must report a silent update.");
+Assert(!UpdateService.IsUpdateAvailable(bundledRelease, sameRelease), "The same version and revision must not report an update.");
+Assert(!UpdateService.IsUpdateAvailable(bundledRelease, olderRelease), "An older remote version must not report an update.");
+var updateHandler = new SequenceHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+{
+    Content = new StringContent(UpdateManifest("3.3.0", "2026-08-05-v3.3.0-2"), Encoding.UTF8, "application/json")
+});
+using (var updateService = new UpdateService(updateHandler))
+{
+    var update = await updateService.CheckForUpdateAsync(CancellationToken.None);
+    Assert(update?.Latest.Revision == "2026-08-05-v3.3.0-2", "The update service must surface a valid silent update manifest.");
+}
+Assert(updateHandler.RequestUris.Single().Query.Contains("check=", StringComparison.Ordinal), "The update manifest request must bypass stale release-asset caches.");
+using (var retriedUpdateService = new UpdateService(new SequenceHttpHandler(
+    _ => throw new HttpRequestException("transient test failure"),
+    _ => new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent(UpdateManifest("3.3.0", "2026-08-06-v3.3.0-3"), Encoding.UTF8, "application/json")
+    })))
+{
+    var update = await retriedUpdateService.CheckForUpdateAsync(CancellationToken.None);
+    Assert(update?.Latest.Revision == "2026-08-06-v3.3.0-3", "A transient update-manifest failure must be retried once.");
+}
+using (var invalidUpdateService = new UpdateService(new SequenceHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+{
+    Content = new StringContent("{invalid json", Encoding.UTF8, "application/json")
+})))
+    Assert(await invalidUpdateService.CheckForUpdateAsync(CancellationToken.None) == null, "Invalid update JSON must not report an update.");
+using (var failedUpdateService = new UpdateService(new SequenceHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable))))
+    Assert(await failedUpdateService.CheckForUpdateAsync(CancellationToken.None) == null, "HTTP update-check failures must not report an update.");
+using (var timeoutUpdateService = new UpdateService(new SequenceHttpHandler(_ => throw new TaskCanceledException("simulated timeout"))))
+    Assert(await timeoutUpdateService.CheckForUpdateAsync(CancellationToken.None) == null, "Timed-out update checks must not report an update.");
 
 var cleanupRoot = Path.Combine(Path.GetTempPath(), "WindowsLite-cache-test-" + Guid.NewGuid().ToString("N"));
 try
@@ -293,6 +359,30 @@ try
 finally
 {
     AppPaths.SafeDeleteDirectory(cleanupRoot);
+}
+
+var offlineBundleTestRoot = Path.Combine(Path.GetTempPath(), "WindowsLite-offline-bundle-test-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var bundleRoot = Path.Combine(offlineBundleTestRoot, "OfflineComponents");
+    var runtimeRoot = Path.Combine(offlineBundleTestRoot, "runtime");
+    var bundledTool = Path.Combine(bundleRoot, "system-tools", "GameRuntimeHealth.bat");
+    var bundledOptimizer = Path.Combine(bundleRoot, "optimizerNXT", "optimizerNXT.exe");
+    Directory.CreateDirectory(Path.GetDirectoryName(bundledTool)!);
+    Directory.CreateDirectory(Path.GetDirectoryName(bundledOptimizer)!);
+    File.WriteAllText(bundledTool, "bundled-game-tool");
+    File.WriteAllText(bundledOptimizer, "bundled-optimizer");
+
+    Assert(AppPaths.RestoreBundledRuntimeComponents(bundleRoot, runtimeRoot) == 2, "The offline bundle must restore missing runtime files.");
+    var restoredTool = Path.Combine(runtimeRoot, "system-tools", "GameRuntimeHealth.bat");
+    Assert(File.ReadAllText(restoredTool) == "bundled-game-tool", "The offline game tool must be restored to the standard runtime directory.");
+    File.WriteAllText(restoredTool, "local-tool");
+    Assert(AppPaths.RestoreBundledRuntimeComponents(bundleRoot, runtimeRoot) == 0, "Startup restoration must preserve existing local components.");
+    Assert(File.ReadAllText(restoredTool) == "local-tool", "Startup restoration must not overwrite an existing local tool.");
+}
+finally
+{
+    AppPaths.SafeDeleteDirectory(offlineBundleTestRoot);
 }
 
 var aggregate = typeof(OptimizerService).GetMethod("AggregateTargetStates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
@@ -489,11 +579,13 @@ internal sealed class SequenceHttpHandler(params Func<HttpRequestMessage, HttpRe
     private readonly Queue<Func<HttpRequestMessage, HttpResponseMessage>> _responses = new(responses);
 
     public List<long?> RangeStarts { get; } = [];
+    public List<Uri> RequestUris { get; } = [];
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         RangeStarts.Add(request.Headers.Range?.Ranges.SingleOrDefault()?.From);
+        if (request.RequestUri != null) RequestUris.Add(request.RequestUri);
         if (_responses.Count == 0) throw new HttpRequestException("No queued response remains for the test request.");
         var response = _responses.Dequeue()(request);
         response.RequestMessage = request;

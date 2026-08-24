@@ -66,6 +66,15 @@
       "assetName": "disable-core-isolation.exe",
       "aliases": ["7：一键关闭Windows内核隔离.exe"]
     },
+    "gameRuntimeHealth": {
+      "version": "local",
+      "description": "检测 Microsoft VC++、DirectX、.NET Framework、WebView2 与 Windows 组件状态；按需提供经校验的修复操作，适合游戏启动失败、DLL 缺失或运行环境异常时使用。",
+      "size": 85642,
+      "sha256": "F33EA553913431A5050265CB2D656EFBF671F23EB240CE022E2C9B5EB69190DD",
+      "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/GameRuntimeHealth.bat",
+      "assetName": "GameRuntimeHealth.bat",
+      "aliases": ["游戏运行环境检测与安全修复工具.bat", "game-runtime-health.bat"]
+    },
     "sevenZip": {
       "version": "26.02",
       "description": "安装 7-Zip 压缩工具，用于处理 7z、zip、rar 等常见压缩包。",
@@ -87,8 +96,8 @@
     "browserHijackClean": {
       "version": "local",
       "description": "清理浏览器主页、搜索和快捷方式劫持项，适合重装系统后浏览器被篡改时使用。",
-      "size": 11306,
-      "sha256": "CC1258DF21578334ABB5C59C439CA2C6D2E59485BE4794138715BCA9EE5B2FC8",
+      "size": 11238,
+      "sha256": "4E936BD953DD10715B24C7F321927026926590C873B14726020C0E268F0738BA",
       "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/browser-hijack-clean.bat",
       "assetName": "browser-hijack-clean.bat",
       "aliases": ["一键清理重装后的浏览器劫持.bat"]
@@ -123,8 +132,8 @@
     "smartDns": {
       "version": "local",
       "description": "对当前 IPv4 网络的多家公共 DNS 进行解析测速，并智能切换低延迟、稳定的 DNS；支持恢复 DHCP，可缓解因 DNS 解析异常导致的部分连接超时。",
-      "size": 10784,
-      "sha256": "D2431CBC67B0522626CDE6CA411277E5DCFE05174E9E675DCDF220E9BD218E00",
+      "size": 25716,
+      "sha256": "DE83CBD5B0845D212F6B2A40DCB63F8949D2BDEF92362608C803ACEC89D173EB",
       "downloadUrl": "https://github.com/yancy520666/system-toolkit-tools/releases/download/tools-v1/smart-dns-switcher.bat",
       "assetName": "smart-dns-switcher.bat",
       "aliases": ["智能DNS切换工具.bat"]

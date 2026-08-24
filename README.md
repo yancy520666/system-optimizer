@@ -40,7 +40,7 @@ dotnet publish -c Release -r win-x64 --self-contained false -o publish
 启动程序位于：
 
 ```text
-SystemOptimizerLite-v3.1-lite-win-x64.zip/SystemOptimizerLite.exe
+SystemOptimizerLite-v3.3-lite-win-x64.zip/SystemOptimizerLite.exe
 ```
 
 需要目标电脑已安装 .NET 8 Desktop Runtime。

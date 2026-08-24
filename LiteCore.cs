@@ -304,6 +304,7 @@ public static class AppPaths
     public static readonly string CacheRoot = Path.Combine(LocalAppData, "cache");
     public static readonly string TransientRoot = Path.Combine(CacheRoot, "transient");
     public static readonly string DriverCachePath = Path.Combine(CacheRoot, "driver-status.json");
+    public static string BundledComponentRoot => Path.Combine(AppContext.BaseDirectory, "OfflineComponents");
 
     public static string DataFile(string name) => Path.Combine(AppContext.BaseDirectory, "Data", name);
 
@@ -314,6 +315,48 @@ public static class AppPaths
         Directory.CreateDirectory(Downloads);
         Directory.CreateDirectory(LogRoot);
         Directory.CreateDirectory(CacheRoot);
+    }
+
+    public static int RestoreBundledRuntimeComponents()
+        => RestoreBundledRuntimeComponents(BundledComponentRoot, Runtime);
+
+    public static int RestoreBundledRuntimeComponents(string bundledRoot, string runtimeRoot)
+    {
+        if (string.IsNullOrWhiteSpace(bundledRoot) || string.IsNullOrWhiteSpace(runtimeRoot) || !Directory.Exists(bundledRoot)) return 0;
+        var restored = 0;
+        foreach (var component in new[] { "optimizerNXT", "bleachbit", "system-tools" })
+        {
+            var source = Path.Combine(bundledRoot, component);
+            if (!Directory.Exists(source)) continue;
+            restored += CopyDirectory(source, Path.Combine(runtimeRoot, component), overwrite: false);
+        }
+        return restored;
+    }
+
+    internal static bool RestoreBundledComponent(string component, string destination)
+    {
+        if (string.IsNullOrWhiteSpace(component) || string.IsNullOrWhiteSpace(destination)) return false;
+        var source = Path.Combine(BundledComponentRoot, component);
+        if (!Directory.Exists(source)) return false;
+        return CopyDirectory(source, destination, overwrite: true) > 0;
+    }
+
+    internal static bool RestoreBundledTool(string assetName, string destination)
+    {
+        if (string.IsNullOrWhiteSpace(assetName) || string.IsNullOrWhiteSpace(destination)) return false;
+        var source = Path.Combine(BundledComponentRoot, "system-tools", assetName);
+        if (!File.Exists(source)) return false;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(destination))!);
+            File.Copy(source, destination, true);
+            return true;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            LogService.Write($"离线工具恢复失败：{assetName} - {ex.Message}");
+            return false;
+        }
     }
 
     public static void CleanupRuntimeComponents()
@@ -353,6 +396,29 @@ public static class AppPaths
         {
             LogService.Write($"临时文件清理跳过：{path} - {ex.Message}");
             return false;
+        }
+    }
+
+    private static int CopyDirectory(string source, string destination, bool overwrite)
+    {
+        try
+        {
+            var copied = 0;
+            foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(source, file);
+                var target = Path.Combine(destination, relative);
+                if (!overwrite && File.Exists(target)) continue;
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Copy(file, target, overwrite);
+                copied++;
+            }
+            return copied;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            LogService.Write($"离线组件恢复失败：{source} - {ex.Message}");
+            return 0;
         }
     }
 
@@ -733,6 +799,132 @@ public sealed class DownloadService : IDisposable
     public void Dispose() => _client.Dispose();
 }
 
+public sealed record AppReleaseInfo(int SchemaVersion, string Version, string Revision, DateTimeOffset ReleasedAt)
+{
+    public string DisplayVersion
+    {
+        get
+        {
+            if (!System.Version.TryParse(Version, out var parsed)) return "V" + Version;
+            return parsed.Build > 0 ? $"V{parsed.Major}.{parsed.Minor}.{parsed.Build}" : $"V{parsed.Major}.{parsed.Minor}";
+        }
+    }
+}
+
+public sealed record AppUpdateInfo(AppReleaseInfo Current, AppReleaseInfo Latest);
+
+public sealed class UpdateService : IDisposable
+{
+    public const string LatestManifestUrl = "https://github.com/yancy520666/system-optimizer/releases/latest/download/system-optimizer-update.json";
+    public const string LatestReleasePageUrl = "https://github.com/yancy520666/system-optimizer/releases/latest";
+    private const int ManifestRequestAttempts = 2;
+    private readonly HttpClient _client;
+
+    public UpdateService()
+        : this(new HttpClientHandler())
+    {
+    }
+
+    internal UpdateService(HttpMessageHandler handler)
+    {
+        // GitHub's latest-release redirect can occasionally take longer on a cold
+        // connection. This is still entirely background work and is canceled when
+        // the app closes, so favor a reliable check over an overly short timeout.
+        _client = new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(15) };
+        _client.DefaultRequestHeaders.UserAgent.ParseAdd("SystemOptimizerLite/3.3");
+        _client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+        _client.DefaultRequestHeaders.TryAddWithoutValidation("Cache-Control", "no-cache");
+        _client.DefaultRequestHeaders.TryAddWithoutValidation("Pragma", "no-cache");
+    }
+
+    public async Task<AppUpdateInfo?> CheckForUpdateAsync(CancellationToken token)
+    {
+        try
+        {
+            var current = LoadBundledReleaseInfo();
+            var latest = await DownloadLatestReleaseInfoAsync(token);
+            return IsUpdateAvailable(current, latest) ? new AppUpdateInfo(current, latest) : null;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogService.Write($"GitHub 更新检查失败：{ex.Message}");
+            return null;
+        }
+    }
+
+    private async Task<AppReleaseInfo> DownloadLatestReleaseInfoAsync(CancellationToken token)
+    {
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < ManifestRequestAttempts; attempt++)
+        {
+            try
+            {
+                // A changing query value prevents a stale CDN/browser cache from
+                // hiding a same-tag (revision-only) Release replacement.
+                var uri = new Uri($"{LatestManifestUrl}?check={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{attempt}");
+                using var response = await _client.GetAsync(uri, HttpCompletionOption.ResponseContentRead, token);
+                if (!response.IsSuccessStatusCode)
+                    throw new HttpRequestException($"更新清单请求失败：HTTP {(int)response.StatusCode} {response.ReasonPhrase}", null, response.StatusCode);
+                if (response.Content.Headers.ContentLength is long length && length > 32 * 1024)
+                    throw new InvalidDataException("更新清单超过允许大小。");
+
+                var json = await response.Content.ReadAsStringAsync(token);
+                if (json.Length > 32 * 1024) throw new InvalidDataException("更新清单超过允许大小。");
+                return ParseManifest(json);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (attempt + 1 < ManifestRequestAttempts && IsTransientManifestError(ex))
+            {
+                lastError = ex;
+                await Task.Delay(TimeSpan.FromMilliseconds(600), token);
+            }
+        }
+
+        throw lastError ?? new HttpRequestException("更新清单请求失败。");
+    }
+
+    private static bool IsTransientManifestError(Exception error)
+        => error is TaskCanceledException or HttpRequestException;
+
+    internal static AppReleaseInfo LoadBundledReleaseInfo()
+        => ParseManifest(File.ReadAllText(AppPaths.DataFile("system-optimizer-update.json"), Encoding.UTF8));
+
+    internal static AppReleaseInfo ParseManifest(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException("更新清单不是 JSON 对象。");
+        if (!root.TryGetProperty("schemaVersion", out var schema) || !schema.TryGetInt32(out var schemaVersion) || schemaVersion != 1)
+            throw new InvalidDataException("更新清单版本不受支持。");
+        var version = root.S("version").Trim();
+        var revision = root.S("revision").Trim();
+        var releasedAtText = root.S("releasedAt").Trim();
+        if (!System.Version.TryParse(version, out var parsedVersion) || parsedVersion.Major < 0 || parsedVersion.Minor < 0)
+            throw new InvalidDataException("更新清单版本无效。");
+        if (string.IsNullOrWhiteSpace(revision) || revision.Length > 128)
+            throw new InvalidDataException("更新清单 revision 无效。");
+        if (!DateTimeOffset.TryParse(releasedAtText, out var releasedAt))
+            throw new InvalidDataException("更新清单发布时间无效。");
+        return new AppReleaseInfo(schemaVersion, version, revision, releasedAt.ToUniversalTime());
+    }
+
+    internal static bool IsUpdateAvailable(AppReleaseInfo current, AppReleaseInfo latest)
+    {
+        if (!System.Version.TryParse(current.Version, out var currentVersion) || !System.Version.TryParse(latest.Version, out var latestVersion)) return false;
+        var compare = latestVersion.CompareTo(currentVersion);
+        return compare > 0 || compare == 0 && !latest.Revision.Equals(current.Revision, StringComparison.Ordinal);
+    }
+
+    public void Dispose() => _client.Dispose();
+}
+
 public sealed class OptimizerService
 {
     public const string PinnedVersion = "v1.0.1";
@@ -794,6 +986,11 @@ public sealed class OptimizerService
         var items = await GetItemsAsync();
         var exeValid = IsExeValid();
         var ready = ReadyCount(items, exeValid);
+        if ((!exeValid || ready != items.Count) && AppPaths.RestoreBundledComponent("optimizerNXT", AppPaths.OptimizerRuntime))
+        {
+            exeValid = IsExeValid();
+            ready = ReadyCount(items, exeValid);
+        }
         if (IsInstalling) return new ComponentStatus(ComponentState.Downloading, string.IsNullOrWhiteSpace(_installMessage) ? "获取远端服务中" : _installMessage, PinnedVersion, ready, items.Count);
         var result = ready == items.Count && exeValid
             ? new ComponentStatus(ComponentState.Online, $"OptimizerNXT 在线 · YAML {ready}/{items.Count}", PinnedVersion, ready, items.Count)
@@ -2694,6 +2891,8 @@ public sealed class CleanerService
         await Task.Yield();
         if (IsInstalling) return new ComponentStatus(ComponentState.Downloading, string.IsNullOrWhiteSpace(_installMessage) ? "获取远端服务中" : _installMessage, PinnedVersion, IsInstalled() ? 1 : 0, 1);
         var validation = ValidateInstallation(AppPaths.CleanerRuntime);
+        if (!validation.IsValid && AppPaths.RestoreBundledComponent("bleachbit", AppPaths.CleanerRuntime))
+            validation = ValidateInstallation(AppPaths.CleanerRuntime);
         if (validation.IsValid)
             return new ComponentStatus(ComponentState.Online, $"BleachBit {PinnedVersion} 在线", PinnedVersion, 1, 1);
         var message = Directory.Exists(AppPaths.CleanerRuntime)
@@ -3325,7 +3524,10 @@ public sealed class ToolboxService
     public bool IsReady(ToolItem item)
     {
         var path = ResolveLocalPath(item);
-        return File.Exists(path) && (string.IsNullOrWhiteSpace(item.Sha256) || DownloadService.Sha256(path).Equals(item.Sha256, StringComparison.OrdinalIgnoreCase));
+        if (File.Exists(path) && (string.IsNullOrWhiteSpace(item.Sha256) || DownloadService.Sha256(path).Equals(item.Sha256, StringComparison.OrdinalIgnoreCase))) return true;
+        if (string.IsNullOrWhiteSpace(item.AssetName) || !AppPaths.RestoreBundledTool(item.AssetName, StandardLocalPath(item))) return false;
+        var restored = ResolveLocalPath(item);
+        return File.Exists(restored) && (string.IsNullOrWhiteSpace(item.Sha256) || DownloadService.Sha256(restored).Equals(item.Sha256, StringComparison.OrdinalIgnoreCase));
     }
 
     public async Task<string> DownloadAndLaunchAsync(ToolItem item, CancellationToken token)
@@ -3377,23 +3579,24 @@ public sealed class ToolboxService
     }
 
     private static string StandardLocalPath(ToolItem item) => Path.Combine(AppPaths.ToolRuntime, string.IsNullOrWhiteSpace(item.AssetName) ? item.Id : item.AssetName);
-    private static bool Dangerous(string id) => id.Contains("activation", StringComparison.OrdinalIgnoreCase) || id.Contains("disable", StringComparison.OrdinalIgnoreCase) || id.Contains("visualFix", StringComparison.OrdinalIgnoreCase) || id.Contains("Hijack", StringComparison.OrdinalIgnoreCase) || id.Equals("smartDns", StringComparison.OrdinalIgnoreCase);
+    private static bool Dangerous(string id) => id.Contains("activation", StringComparison.OrdinalIgnoreCase) || id.Contains("disable", StringComparison.OrdinalIgnoreCase) || id.Contains("visualFix", StringComparison.OrdinalIgnoreCase) || id.Contains("Hijack", StringComparison.OrdinalIgnoreCase) || id.Equals("smartDns", StringComparison.OrdinalIgnoreCase) || id.Equals("gameRuntimeHealth", StringComparison.OrdinalIgnoreCase);
     private static int ToolOrder(string id) => id switch
     {
         "activation" => 30,
         "oneKeyActivate" => 31,
-        "sevenZip" => 80,
-        "archiveTool" => 81,
         "dxRepair" => 10,
         "runtime" => 20,
         "driverToolVip" => 40,
         "disableUac" => 50,
         "disableSecurityUpdate" => 51,
         "disableCoreIsolation" => 52,
+        "gameRuntimeHealth" => 53,
+        "smartDns" => 54,
+        "browserHijackClean" => 55,
+        "visualFix" => 56,
         "geekUninstaller" => 70,
-        "browserHijackClean" => 90,
-        "smartDns" => 95,
-        "visualFix" => 100,
+        "sevenZip" => 80,
+        "archiveTool" => 81,
         _ => 999
     };
     private static string ToolName(string id) => id switch
@@ -3405,6 +3608,7 @@ public sealed class ToolboxService
         "disableSecurityUpdate" => "Windows 更新与安全设置工具",
         "driverToolVip" => "驱动总裁 VIP",
         "disableCoreIsolation" => "关闭内核隔离",
+        "gameRuntimeHealth" => "游戏运行环境检测与安全修复工具",
         "sevenZip" => "7-Zip",
         "geekUninstaller" => "Geek 卸载工具",
         "browserHijackClean" => "浏览器劫持清理",
@@ -3421,6 +3625,7 @@ public sealed class ToolboxService
         "browserHijackClean" => "清理重装系统后的浏览器劫持项。",
         "visualFix" => "尝试修复 Windows 11 视觉显示异常。",
         "smartDns" => "智能测速并切换 IPv4 DNS，支持恢复 DHCP 自动配置。",
+        "gameRuntimeHealth" => "检测游戏运行组件并按需提供安全修复操作。",
         _ => "从固定 GitHub 工具仓库按需下载并启动。"
     };
 }
